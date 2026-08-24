@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "attack-surface"
+version = "0.1.0"
+description = "Построение поверхности атаки: извлечение точек входа, генерация графа и отчётов на базе trailmark"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = [
+    "trailmark>=0.3,<1.0",
+    "openai>=1.0,<3.0",
+    "tiktoken>=0.7,<1.0",
+    "python-dotenv>=1.0,<2.0",
+    "tqdm>=4.60,<5.0",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.30,<1.0"]
+google = ["google-generativeai>=0.5,<1.0"]
+all = ["attack-surface[anthropic,google]"]
+
+[project.scripts]
+attack-surface = "attack_surface.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.15.0,<1.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "I", "N", "W", "UP",
+    "ANN", "S", "B", "C4", "SIM",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "ANN401"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
