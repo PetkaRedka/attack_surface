@@ -140,6 +140,10 @@ class LLMToolInput(ABC):
             return NotImplemented
         return hash(self) == hash(other)
 
+    def describe(self) -> str:
+        """Краткое описание входа для журналирования."""
+        return ""
+
 
 class LLMToolOutput(ABC):
     """Базовый выход LLM-инструмента."""
@@ -187,7 +191,8 @@ class LLMTool(ABC):
 
     def _invoke(self, inp: LLMToolInput) -> LLMToolOutput | None:
         name = type(self).__name__
-        self.logger.print_console(f"LLM-инструмент {name} вызван.")
+        detail = f": {inp.describe()}" if inp.describe() else ""
+        self.logger.debug(f"LLM-инструмент {name} вызван{detail}")
 
         if inp in self._cache:
             self.logger.print_log("Попадание в кеш.")

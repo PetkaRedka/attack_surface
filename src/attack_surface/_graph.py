@@ -11,6 +11,8 @@ import os
 from collections import defaultdict
 from typing import Any
 
+from tqdm import tqdm
+
 from attack_surface._ext_minimizer import EXTMinimizer, EXTMinimizerInput, EXTMinimizerOutput
 from attack_surface._logger import Logger
 from attack_surface._models import ENTRY_POINT_DISPLAY_NAMES
@@ -59,6 +61,21 @@ def _orthogonal(x1: float, y1: float, x2: float, y2: float) -> list[float]:
 # Группировка модулей
 # ---------------------------------------------------------------------------
 
+def module_name_for_path(file_path: str) -> str:
+    """Определить имя модуля по пути к файлу (по структуре каталогов)."""
+    parts = file_path.replace("\\", "/").split("/")
+
+    module_name = "root"
+    for i, part in enumerate(parts):
+        if part in ("src", "lib", "app", "source", "modules"):
+            if i + 1 < len(parts) - 1:
+                module_name = parts[i + 1]
+            break
+    if module_name == "root" and len(parts) > 2:
+        module_name = parts[-2]
+    return module_name
+
+
 def _group_into_modules(
     entry_points: dict[str, Any],
     language: str,
@@ -75,17 +92,7 @@ def _group_into_modules(
     )
 
     for ep_id, ep_info in entry_points.items():
-        file_path = ep_info.get("file_path", "").replace("\\", "/")
-        parts = file_path.split("/")
-
-        module_name = "root"
-        for i, part in enumerate(parts):
-            if part in ("src", "lib", "app", "source", "modules"):
-                if i + 1 < len(parts) - 1:
-                    module_name = parts[i + 1]
-                break
-        if module_name == "root" and len(parts) > 2:
-            module_name = parts[-2]
+        module_name = module_name_for_path(ep_info.get("file_path", ""))
 
         ep_types: set[str] = set()
         for src in ep_info.get("external_input_sources", []):
@@ -116,7 +123,9 @@ def _minimize_ext(
         logger=logger,
     )
 
-    for mod_name, mod_data in modules.items():
+    for mod_name, mod_data in tqdm(
+        modules.items(), desc="Минимизация EXT", unit="модуль"
+    ):
         if not mod_data.get("entry_points"):
             continue
 

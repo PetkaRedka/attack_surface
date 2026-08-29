@@ -53,6 +53,8 @@ logs/
 
 # Output files
 output/
+call_graph_output/
+attack_surface_output/
 results/
 *.svg
 *.json
@@ -65,3 +67,6 @@ attack_surface_report.html
 *.tmp
 *.bak
 .cache/
+
+# uv
+uv.lock

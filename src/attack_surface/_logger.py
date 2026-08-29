@@ -24,17 +24,26 @@ class Logger:
         formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
         file_handler = logging.FileHandler(self.log_file_path, mode="a", encoding="utf-8")
-        file_handler.setLevel(log_level)
+        # Файл пишет всё, включая DEBUG
+        file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(formatter)
         self._logger.addHandler(file_handler)
 
         self._console_handler = logging.StreamHandler(sys.stdout)
+        # В консоль — только сообщения уровня не ниже log_level
         self._console_handler.setLevel(log_level)
         self._console_handler.setFormatter(formatter)
 
     # ------------------------------------------------------------------
     # Публичные методы
     # ------------------------------------------------------------------
+
+    def debug(self, *args: Any) -> None:
+        """Запись только в файл на уровне DEBUG."""
+        with self._lock:
+            if self._console_handler in self._logger.handlers:
+                self._logger.removeHandler(self._console_handler)
+            self._logger.debug(" ".join(map(str, args)))
 
     def print_log(self, *args: Any) -> None:
         """Запись только в файл."""

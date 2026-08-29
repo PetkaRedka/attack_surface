@@ -36,6 +36,9 @@ class EXTMinimizerInput(LLMToolInput):
     def __hash__(self) -> int:
         return hash((self.module_name, tuple(sorted(self.ext_types))))
 
+    def describe(self) -> str:
+        return f"модуль {self.module_name}"
+
 
 class EXTMinimizerOutput(LLMToolOutput):
     """Результат минимизации EXT."""

@@ -11,6 +11,7 @@ from attack_surface._call_graph import CallGraphBuilder
 from attack_surface._extractor import EntryPointExtractor
 from attack_surface._graph import generate_attack_surface_graph
 from attack_surface._logger import Logger
+from attack_surface._project_config import ProjectConfig
 from attack_surface._report import generate_html_report
 
 
@@ -62,6 +63,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Формат вывода: svg (визуализация), cert (CERT JSON GoJS), stats (статистика)"
     )
 
+    # --- project --------------------------------------------------------
+    proj = sub.add_parser(
+        "project", help="Сканировать мульти-репозиторный проект (кросс-репо граф)"
+    )
+    proj.add_argument(
+        "--config", required=True,
+        help="Путь к конфигурации проекта (JSON или Threagile YAML)",
+    )
+    proj.add_argument("--output-dir", default="./project_output", help="Каталог результатов")
+    proj.add_argument(
+        "--graph-format", choices=["svg", "cert"], default="svg",
+        help="Формат визуализации графа",
+    )
+    proj.add_argument("--model-name", default=None, help="Имя LLM-модели")
+    proj.add_argument("--no-llm", action="store_true", help="Не использовать LLM (только статика)")
+
+    # --- export-threagile -----------------------------------------------
+    exp = sub.add_parser(
+        "export-threagile",
+        help="Сгенерировать архитектурный файл Threagile (YAML) из JSON-конфигурации",
+    )
+    exp.add_argument("--config", required=True, help="Путь к JSON-конфигурации проекта")
+    exp.add_argument("--output", required=True, help="Путь к выходному YAML-файлу")
+
     return p
 
 
@@ -75,6 +100,10 @@ def main(argv: list[str] | None = None) -> None:
         _cmd_graph_from_json(args)
     elif args.command == "call-graph":
         _cmd_call_graph(args)
+    elif args.command == "project":
+        _cmd_project(args)
+    elif args.command == "export-threagile":
+        _cmd_export_threagile(args)
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +325,55 @@ def _export_cert_format(graph, output_path: str, project_name: str, language: st
     # Сохранить в файл
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(cert_data, f, indent=2, ensure_ascii=False)
+
+
+def _cmd_project(args: argparse.Namespace) -> None:
+    """Сканировать мульти-репозиторный проект."""
+    from attack_surface._project_pipeline import ProjectScanner
+
+    output_dir = os.path.abspath(args.output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(output_dir, "log", "project.log")
+    logger = Logger(log_path)
+
+    config = _load_project_config(args.config)
+    logger.print_console(f"Проект: {config.project} ({len(config.repos)} репозиториев)")
+    logger.print_console(
+        f"Режим связей: {'архитектурный (Threagile)' if config.links_authoritative else 'эвристический'}"
+    )
+
+    model = args.model_name or os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini")
+    scanner = ProjectScanner(
+        config=config,
+        logger=logger,
+        model_name=model,
+        use_llm=not args.no_llm,
+        output_dir=output_dir,
+        graph_format=args.graph_format,
+    )
+    scanner.scan()
+    logger.print_console("Готово.")
+
+
+def _cmd_export_threagile(args: argparse.Namespace) -> None:
+    """Сгенерировать Threagile YAML из JSON-конфигурации."""
+    from attack_surface._project_config import load_project_config
+    from attack_surface._threagile import save_threagile
+
+    config = load_project_config(args.config)
+    path = save_threagile(config, args.output)
+    print(f"Threagile-файл сохранён: {path}")
+
+
+def _load_project_config(config_path: str) -> ProjectConfig:
+    """Загрузить конфигурацию проекта из JSON или Threagile YAML (по расширению)."""
+    from attack_surface._project_config import load_project_config
+    from attack_surface._threagile import load_threagile
+
+    ext = os.path.splitext(config_path)[1].lower()
+    if ext in (".yaml", ".yml"):
+        return load_threagile(config_path)
+    return load_project_config(config_path)
 
 
 if __name__ == "__main__":

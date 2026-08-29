@@ -10,17 +10,13 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
-    "trailmark>=0.3,<1.0",
+    "trailmark",
     "openai>=1.0,<3.0",
     "tiktoken>=0.7,<1.0",
     "python-dotenv>=1.0,<2.0",
     "tqdm>=4.60,<5.0",
+    "pyyaml>=6.0,<7.0",
 ]
-
-[project.optional-dependencies]
-anthropic = ["anthropic>=0.30,<1.0"]
-google = ["google-generativeai>=0.5,<1.0"]
-all = ["attack-surface[anthropic,google]"]
 
 [project.scripts]
 attack-surface = "attack_surface.cli:main"
