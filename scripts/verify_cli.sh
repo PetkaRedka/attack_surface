@@ -65,6 +65,11 @@ echo "--- project store (JSON, svg) ---"
 echo "--- project store (JSON, cert) ---"
 "$CLI" project --config test_projects/store/project.json \
     --output-dir "$OUT/project-store-cert" --no-llm --graph-format cert
+
+echo "--- project store (пересборка из проверенных точек входа) ---"
+"$CLI" project --config test_projects/store/project.json \
+    --entrypoints-dir "$OUT/project-store/repos" \
+    --output-dir "$OUT/project-store-reuse" --no-llm
 echo "--- project multi-service (Threagile) ---"
 "$CLI" project --config test_projects/multi-service/threagile.yaml \
     --output-dir "$OUT/project-multi" --no-llm

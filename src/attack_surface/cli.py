@@ -93,6 +93,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--auto-links", action="store_true",
         help="Искать связи перебором всех пар репозиториев, игнорируя links из конфига",
     )
+    proj.add_argument(
+        "--entrypoints-dir",
+        default=None,
+        help="Каталог с проверенными точками входа (repos/*_entry_points.json): "
+        "этап нахождения точек входа внутри репозиториев пропускается",
+    )
 
     # --- export-threagile -----------------------------------------------
     exp = sub.add_parser(
@@ -377,6 +383,7 @@ def _cmd_project(args: argparse.Namespace) -> None:
         output_dir=output_dir,
         graph_format=args.graph_format,
         auto_links=args.auto_links,
+        entrypoints_dir=args.entrypoints_dir,
     )
     scanner.scan()
     logger.print_console("Готово.")

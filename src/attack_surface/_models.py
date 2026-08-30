@@ -73,6 +73,16 @@ class ExternalSource:
     file_path: str
     entry_point_type: str = "unknown"
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ExternalSource":
+        """Восстановить источник из JSON (см. ``to_dict``)."""
+        return cls(
+            name=str(data.get("name", "")),
+            line_number=int(data.get("line_number", 0)),
+            file_path=str(data.get("file", "")),
+            entry_point_type=str(data.get("entry_point_type", "unknown")),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
@@ -101,6 +111,27 @@ class EntryPointInfo:
     confidence: str = "high"
     is_root_function: bool = False
     explanation: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "EntryPointInfo":
+        """Восстановить точку входа из JSON (см. ``to_dict``)."""
+        return cls(
+            node_id=str(data.get("node_id", "")),
+            function_name=str(data.get("function_name", "")),
+            file_path=str(data.get("file_path", "")),
+            start_line=int(data.get("start_line", 0)),
+            end_line=int(data.get("end_line", 0)),
+            entry_point_type=str(data.get("entry_point_type", "unknown")),
+            external_data_description=str(data.get("external_data_description", "")),
+            external_sources=[
+                ExternalSource.from_dict(s)
+                for s in data.get("external_input_sources", [])
+                if isinstance(s, dict)
+            ],
+            confidence=str(data.get("confidence", "high")),
+            is_root_function=bool(data.get("is_root_function", False)),
+            explanation=str(data.get("explanation", "")),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -47,6 +47,22 @@ class InterfaceDescriptor:
         """Имеет ли точка входа определяемый интерфейс связи."""
         return self.interface_kind not in ("", "none") and bool(self.signature)
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "InterfaceDescriptor":
+        """Восстановить дескриптор из JSON (см. ``to_dict``)."""
+        aliases = data.get("signature_aliases", [])
+        if not isinstance(aliases, list):
+            aliases = []
+        return cls(
+            is_entry_point=bool(data.get("is_entry_point", True)),
+            entry_point_confidence=str(data.get("entry_point_confidence", "high")),
+            interface_role=str(data.get("interface_role", "none")),
+            interface_kind=str(data.get("interface_kind", "none")),
+            signature=str(data.get("signature", "")),
+            signature_aliases=[str(a) for a in aliases],
+            explanation=str(data.get("explanation", "")),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "is_entry_point": self.is_entry_point,

@@ -31,7 +31,7 @@ from attack_surface._interface_llm import (
     InterfaceDescriptor,
     fallback_descriptor,
 )
-from attack_surface._link_llm import LinkValidatorLLM, confirm_edges
+from attack_surface._link_llm import LinkBatchValidatorLLM, confirm_edges_batch
 from attack_surface._linker import CrossRepoEdge, CrossRepoLinker
 from attack_surface._logger import Logger
 from attack_surface._models import EntryPointInfo
@@ -189,6 +189,106 @@ def _group_batches_by_file(
 
 
 # ---------------------------------------------------------------------------
+# Загрузка проверенных точек входа из JSON
+# ---------------------------------------------------------------------------
+
+def _find_entrypoints_file(entrypoints_dir: str, repo_name: str) -> str | None:
+    """Найти сохранённый файл точек входа репозитория."""
+    candidates = [
+        os.path.join(entrypoints_dir, "repos", f"{repo_name}_entry_points.json"),
+        os.path.join(entrypoints_dir, f"{repo_name}_entry_points.json"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def load_repo_scan_results(
+    config: ProjectConfig,
+    entrypoints_dir: str,
+    logger: Logger | None = None,
+) -> list[RepoScanResult]:
+    """Загрузить проверенные точки входа репозиториев из JSON.
+
+    Ожидаются файлы ``<имя>_entry_points.json`` в ``entrypoints_dir`` или
+    в его подкаталоге ``repos`` (именно так их сохраняет ``project``).
+    Интерфейсы связи берутся из JSON — исходный код репозиториев не
+    читается вовсе, пайплайн сразу переходит к этапу слияния графов
+    (линковке эндпоинтов между репозиториями).
+
+    :raises ValueError: если для какого-то репозитория файл не найден.
+    """
+    results: list[RepoScanResult] = []
+    for repo in config.repos:
+        path = _find_entrypoints_file(entrypoints_dir, repo.name)
+        if path is None:
+            raise ValueError(
+                f"Не найден файл точек входа для репозитория '{repo.name}': "
+                f"ожидался '{repo.name}_entry_points.json' в {entrypoints_dir}"
+            )
+
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            raise ValueError(f"Некорректный JSON в файле: {path}")
+
+        entry_points: dict[str, EntryPointInfo] = {}
+        for node_id, ep in (data.get("entry_points") or {}).items():
+            if isinstance(ep, dict):
+                entry_points[str(node_id)] = EntryPointInfo.from_dict(ep)
+
+        interfaces: dict[str, InterfaceDescriptor] = {}
+        for node_id, desc in (data.get("interfaces") or {}).items():
+            if isinstance(desc, dict):
+                interfaces[str(node_id)] = InterfaceDescriptor.from_dict(desc)
+
+        language = str(data.get("language") or repo.language)
+        if logger is not None:
+            logger.print_console(
+                f"  {repo.name}: {len(entry_points)} точек входа "
+                f"({len(interfaces)} интерфейсов) из {path}"
+            )
+
+        # graph не восстанавливается: код репозиториев не читается, этап
+        # слияния использует только точки входа и интерфейсы из JSON
+        results.append(
+            RepoScanResult(
+                repo=repo,
+                language=language,
+                entry_points=entry_points,
+                interfaces=interfaces,
+                graph=None,
+            )
+        )
+    return results
+
+
+def _resolve_node_eps(
+    entry_points: dict[str, EntryPointInfo], file_path: str, line: int
+) -> str:
+    """Найти id точки входа по файлу и строке без графа вызовов.
+
+    Аналог ``_resolve_node`` для режима пересборки из JSON, когда граф
+    вызовов недоступен: ищется точка входа с наименьшим охватывающим
+    диапазоном строк.
+    """
+    norm = os.path.normpath(file_path).replace("\\", "/").lower()
+    best_id = ""
+    best_span: int | None = None
+    for node_id, ep in entry_points.items():
+        ep_file = os.path.normpath(ep.file_path).replace("\\", "/").lower()
+        if ep_file != norm:
+            continue
+        if ep.start_line <= line <= ep.end_line:
+            span = ep.end_line - ep.start_line
+            if best_span is None or span < best_span:
+                best_span = span
+                best_id = node_id
+    return best_id
+
+
+# ---------------------------------------------------------------------------
 # Оркестратор
 # ---------------------------------------------------------------------------
 
@@ -207,6 +307,7 @@ class ProjectScanner:
         output_dir: str = ".",
         graph_format: str = "svg",
         auto_links: bool = False,
+        entrypoints_dir: str | None = None,
     ) -> None:
         self._config = config
         self._logger = logger
@@ -219,6 +320,9 @@ class ProjectScanner:
         #: Авто-режим связывания: перебор всех пар репозиториев без связей
         #: из конфига (включается флагом или при пустом списке связей).
         self._auto_links = auto_links
+        #: Каталог с проверенными точками входа (JSON): этап нахождения
+        #: точек входа внутри репозиториев пропускается.
+        self._entrypoints_dir = os.path.abspath(entrypoints_dir) if entrypoints_dir else None
 
         self._bidirectional = _env_flag("CROSS_REPO_BIDIRECTIONAL", True)
         self._confirm_links = _env_flag("CROSS_REPO_CONFIRM_LINKS", True)
@@ -233,9 +337,19 @@ class ProjectScanner:
             f"Мульти-репозиторное сканирование: {self._config.project}"
         )
 
-        repo_results: list[RepoScanResult] = []
-        for repo in self._config.repos:
-            repo_results.append(self._scan_repo(repo))
+        repo_results: list[RepoScanResult]
+        if self._entrypoints_dir:
+            # Точки входа уже проверены — загружаем их из JSON
+            self._logger.print_console(
+                "Загрузка проверенных точек входа (этап нахождения пропущен)"
+            )
+            repo_results = load_repo_scan_results(
+                self._config, self._entrypoints_dir, self._logger
+            )
+        else:
+            repo_results = []
+            for repo in self._config.repos:
+                repo_results.append(self._scan_repo(repo))
 
         # Связывание эндпоинтов между репозиториями
         repo_interfaces = {r.repo.name: self._repo_interfaces(r) for r in repo_results}
@@ -251,31 +365,35 @@ class ProjectScanner:
             edges = linker.find_auto_links(repo_interfaces)
             self._logger.print_console(f"  Найдено кандидатов связей (авто-перебор): {len(edges)}")
 
-            if self._use_llm and self._confirm_links and edges:
-                validator = LinkValidatorLLM(
-                    self._model_name, self._temperature, "multi", self._max_query_num, self._logger
-                )
-                edges = confirm_edges(validator, edges)
-                self._logger.print_console(f"  Подтверждено связей: {len(edges)}")
+            edges = self._confirm_edges_batch(edges)
         else:
             edges = linker.find_links(repo_interfaces)
             self._logger.print_console(f"  Найдено кандидатов связей: {len(edges)}")
 
-            if self._use_llm and self._confirm_links and edges:
-                validator = LinkValidatorLLM(
-                    self._model_name, self._temperature, "multi", self._max_query_num, self._logger
-                )
-                edges = confirm_edges(validator, edges)
-                self._logger.print_console(f"  Подтверждено связей: {len(edges)}")
+            edges = self._confirm_edges_batch(edges)
 
-        # Сопоставление клиентских функций для достижимости
+        # Сопоставление клиентских функций для достижимости.
+        # Без графа вызовов (пересборка из JSON) узел резолвится по точкам входа.
         for edge in edges:
+            if edge.client_node_id:
+                continue
             client_graph = self._graph_for(repo_results, edge.client_repo)
-            if client_graph is not None and not edge.client_node_id:
+            if client_graph is not None:
                 node_id = _resolve_node(client_graph, edge.client_file, edge.client_line)
-                edge.client_node_id = node_id
                 if node_id:
+                    edge.client_node_id = node_id
                     edge.client_function_name = _node_names(client_graph).get(node_id, "")
+            else:
+                node_id = _resolve_node_eps(
+                    self._entry_points_for(repo_results, edge.client_repo),
+                    edge.client_file,
+                    edge.client_line,
+                )
+                if node_id:
+                    edge.client_node_id = node_id
+                    edge.client_function_name = self._entry_points_for(
+                        repo_results, edge.client_repo
+                    )[node_id].function_name
 
         # Поверхность атаки большого графа
         attack_surface = self._compute_attack_surface(repo_results, edges)
@@ -288,6 +406,20 @@ class ProjectScanner:
         )
         self._save_results(result)
         return result
+
+    # ------------------------------------------------------------------
+
+    def _confirm_edges_batch(self, edges: list[CrossRepoEdge]) -> list[CrossRepoEdge]:
+        """Подтвердить кандидатов связей батчами (или без LLM)."""
+        if not (self._use_llm and self._confirm_links and edges):
+            return edges
+        batch_size = max(1, _env_int("LINK_BATCH_SIZE", 10))
+        validator = LinkBatchValidatorLLM(
+            self._model_name, self._temperature, "multi", self._max_query_num, self._logger
+        )
+        edges = confirm_edges_batch(validator, edges, batch_size)
+        self._logger.print_console(f"  Подтверждено связей: {len(edges)}")
+        return edges
 
     # ------------------------------------------------------------------
 
@@ -382,11 +514,16 @@ class ProjectScanner:
 
     @staticmethod
     def _repo_interfaces(result: RepoScanResult) -> list[dict[str, Any]]:
-        """Список интерфейсных эндпоинтов репозитория для линкера."""
+        """Список интерфейсных эндпоинтов репозитория для линкера.
+
+        Учитываются только валидированные точки входа (``is_entry_point``),
+        у которых определён интерфейс связи: невалидные точки отсекаются
+        до процесса стыковки.
+        """
         items: list[dict[str, Any]] = []
         for node_id, ep in result.entry_points.items():
             desc = result.interfaces.get(node_id)
-            if desc is None or not desc.has_interface():
+            if desc is None or not desc.is_entry_point or not desc.has_interface():
                 continue
             items.append(
                 {
@@ -410,6 +547,16 @@ class ProjectScanner:
                 return result.graph
         return None
 
+    @staticmethod
+    def _entry_points_for(
+        repo_results: list[RepoScanResult], repo_name: str
+    ) -> dict[str, EntryPointInfo]:
+        """Точки входа репозитория по имени (пусто, если репозиторий не найден)."""
+        for result in repo_results:
+            if result.repo.name == repo_name:
+                return result.entry_points
+        return {}
+
     def _compute_attack_surface(
         self,
         repo_results: list[RepoScanResult],
@@ -421,13 +568,15 @@ class ProjectScanner:
         sources: list[tuple[str, str]] = []
 
         for result in repo_results:
-            if result.graph is None:
-                continue
-            names = _node_names(result.graph)
-            for node_id, name in names.items():
-                node_names[(result.repo.name, node_id)] = name
-            for src, dst in _call_edges(result.graph):
-                call_edges.append((result.repo.name, src, dst))
+            if result.graph is not None:
+                names = _node_names(result.graph)
+                for node_id, name in names.items():
+                    node_names[(result.repo.name, node_id)] = name
+                for src, dst in _call_edges(result.graph):
+                    call_edges.append((result.repo.name, src, dst))
+            # Без графа (пересборка из JSON) имена берутся из точек входа
+            for node_id, ep in result.entry_points.items():
+                node_names.setdefault((result.repo.name, node_id), ep.function_name)
             for node_id, desc in result.interfaces.items():
                 if desc.is_server():
                     sources.append((result.repo.name, node_id))
