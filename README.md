@@ -117,9 +117,38 @@ attack-surface project --config threagile.yaml --output-dir ./out
 # Только статический анализ (без LLM)
 attack-surface project --config project.json --no-llm
 
+# Без конфига: автосоставление по корню проекта (JSON), связи ищутся перебором
+attack-surface project --project-path ./my-product --output-dir ./out --no-llm
+
+# Автосоставление в архитектурный YAML Threagile
+attack-surface project --project-path ./my-product --config-format threagile --output-dir ./out --no-llm
+
+# Искать связи перебором всех пар репозиториев, игнорируя links из конфига
+attack-surface project --config project.json --auto-links --output-dir ./out --no-llm
+
 # Сгенерировать архитектурный файл Threagile из JSON-конфига
 attack-surface export-threagile --config project.json --output threagile.yaml
 ```
+
+### Автосоставление конфигурации и авто-линковка
+
+Если конфигурационного файла нет, можно запустить `project` с `--project-path`:
+подкаталоги первого уровня с определяемым языком становятся репозиториями
+(язык определяется по маркерам: `go.mod`, `tsconfig.json`, `package.json`,
+`*.csproj`, `CMakeLists.txt`, `*.py` и т.п.), а конфигурация сохраняется
+в `output-dir` как `<проект>.auto.json` или `<проект>.auto.yaml`
+(`--config-format json|threagile`). Каталоги без кода (docs и т.п.)
+пропускаются.
+
+Когда связи в конфиге отсутствуют (или задан флаг `--auto-links`), работает
+авто-линковка: перебираются все пары репозиториев, для каждой пары сигнатуры
+серверных эндпоинтов ищутся в коде другого репозитория (плюс обратный проход
+при `CROSS_REPO_BIDIRECTIONAL=true`). Тип найденной связи выводится из
+`interface_kind` эндпоинта, дубликаты совпадений отбрасываются.
+
+Для конфига, заданного архитектором (Threagile с `data_flows`), связи
+остаются доверенными и авто-линковка не применяется (кроме явного
+`--auto-links`).
 
 ### Интеграция с Threagile
 

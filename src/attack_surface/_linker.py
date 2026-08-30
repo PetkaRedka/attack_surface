@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from attack_surface._project_config import LinkConfig, ProjectConfig
+from attack_surface._project_config import LinkConfig, LinkType, ProjectConfig, VALID_LINK_TYPES
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +134,19 @@ def kind_compatible(kind: str, link_type: str) -> bool:
     if kind in ("", "none"):
         return False
     return link_type in _KIND_COMPATIBILITY.get(kind, set())
+
+
+def link_type_for_kind(kind: str) -> str:
+    """Тип связи по умолчанию для ``interface_kind`` эндпоинта.
+
+    Используется в авто-режиме связывания, когда тип связи не задан
+    в конфиге, а определяется по интерфейсу найденного эндпоинта.
+    """
+    if kind in VALID_LINK_TYPES:
+        return kind
+    if kind in _KIND_COMPATIBILITY:
+        return next(iter(sorted(_KIND_COMPATIBILITY[kind])), LinkType.RPC.value)
+    return LinkType.RPC.value
 
 
 # ---------------------------------------------------------------------------
@@ -294,16 +307,20 @@ class CrossRepoLinker:
 
     @staticmethod
     def _server_endpoints(
-        endpoints: list[dict[str, Any]], link_type: str
+        endpoints: list[dict[str, Any]], link_type: str | None
     ) -> list[dict[str, Any]]:
-        """Серверные эндпоинты, совместимые с типом связи."""
+        """Серверные эндпоинты, совместимые с типом связи.
+
+        Если ``link_type`` не задан (авто-режим), фильтр по типу
+        пропускается — подходят все эндпоинты с сигнатурой.
+        """
         result: list[dict[str, Any]] = []
         for ep in endpoints:
             role = str(ep.get("interface_role", ""))
             kind = str(ep.get("interface_kind", ""))
             if (
                 role in ("server", "both")
-                and kind_compatible(kind, link_type)
+                and (link_type is None or kind_compatible(kind, link_type))
                 and ep.get("signature")
             ):
                 result.append(ep)
@@ -311,16 +328,20 @@ class CrossRepoLinker:
 
     @staticmethod
     def _client_endpoints(
-        endpoints: list[dict[str, Any]], link_type: str
+        endpoints: list[dict[str, Any]], link_type: str | None
     ) -> list[dict[str, Any]]:
-        """Клиентские эндпоинты, совместимые с типом связи."""
+        """Клиентские эндпоинты, совместимые с типом связи.
+
+        Если ``link_type`` не задан (авто-режим), фильтр по типу
+        пропускается — подходят все эндпоинты с сигнатурой.
+        """
         result: list[dict[str, Any]] = []
         for ep in endpoints:
             role = str(ep.get("interface_role", ""))
             kind = str(ep.get("interface_kind", ""))
             if (
                 role in ("client", "both")
-                and kind_compatible(kind, link_type)
+                and (link_type is None or kind_compatible(kind, link_type))
                 and ep.get("signature")
             ):
                 result.append(ep)
@@ -405,6 +426,84 @@ class CrossRepoLinker:
                             )
                         )
                         break
+        return edges
+
+    # ------------------------------------------------------------------
+
+    def find_auto_links(
+        self, repo_interfaces: dict[str, list[dict[str, Any]]]
+    ) -> list[CrossRepoEdge]:
+        """Авто-режим: перебор всех пар репозиториев без связей из конфига.
+
+        Для каждой упорядоченной пары ``(from, to)`` ищет обращения к
+        серверным эндпоинтам ``to`` в коде ``from`` (и обратный проход
+        при ``bidirectional``). Тип связи определяется по ``interface_kind``
+        найденного эндпоинта, дубликаты отбрасываются.
+        """
+        edges: list[CrossRepoEdge] = []
+        seen: set[tuple[str, str, str, str, str, int]] = set()
+        repo_names = sorted(self._config.repo_names())
+
+        for from_repo in repo_names:
+            client_root = self._repo_paths.get(from_repo, "")
+            if not client_root:
+                continue
+            for to_repo in repo_names:
+                if from_repo == to_repo:
+                    continue
+                server_eps = self._server_endpoints(
+                    repo_interfaces.get(to_repo, []), None
+                )
+                if not server_eps:
+                    continue
+
+                for server_ep in server_eps:
+                    link = LinkConfig(
+                        from_repo=from_repo,
+                        to_repo=to_repo,
+                        type=link_type_for_kind(str(server_ep.get("interface_kind", ""))),
+                    )
+                    for edge in self._search_forward(link, server_ep, client_root):
+                        key = (
+                            edge.client_repo,
+                            edge.server_repo,
+                            edge.link.type,
+                            edge.server_node_id,
+                            edge.client_file,
+                            edge.client_line,
+                        )
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        edges.append(edge)
+
+                if self._bidirectional:
+                    client_eps = self._client_endpoints(
+                        repo_interfaces.get(from_repo, []), None
+                    )
+                    for client_ep in client_eps:
+                        link = LinkConfig(
+                            from_repo=from_repo,
+                            to_repo=to_repo,
+                            type=link_type_for_kind(
+                                str(client_ep.get("interface_kind", ""))
+                            ),
+                        )
+                        for edge in self._search_reverse(
+                            link, [client_ep], server_eps
+                        ):
+                            key = (
+                                edge.client_repo,
+                                edge.server_repo,
+                                edge.link.type,
+                                edge.server_node_id,
+                                edge.client_file,
+                                edge.client_line,
+                            )
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            edges.append(edge)
         return edges
 
     # ------------------------------------------------------------------

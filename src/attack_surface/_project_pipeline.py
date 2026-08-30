@@ -206,6 +206,7 @@ class ProjectScanner:
         use_llm: bool = True,
         output_dir: str = ".",
         graph_format: str = "svg",
+        auto_links: bool = False,
     ) -> None:
         self._config = config
         self._logger = logger
@@ -215,6 +216,9 @@ class ProjectScanner:
         self._use_llm = use_llm
         self._output_dir = os.path.abspath(output_dir)
         self._graph_format = graph_format
+        #: Авто-режим связывания: перебор всех пар репозиториев без связей
+        #: из конфига (включается флагом или при пустом списке связей).
+        self._auto_links = auto_links
 
         self._bidirectional = _env_flag("CROSS_REPO_BIDIRECTIONAL", True)
         self._confirm_links = _env_flag("CROSS_REPO_CONFIRM_LINKS", True)
@@ -237,10 +241,22 @@ class ProjectScanner:
         repo_interfaces = {r.repo.name: self._repo_interfaces(r) for r in repo_results}
         linker = CrossRepoLinker(self._config, bidirectional=self._bidirectional)
 
-        if self._config.links_authoritative:
+        if self._config.links_authoritative and self._config.links and not self._auto_links:
             # Связи заданы архитектором — не верифицируем, а сопоставляем эндпоинты
             edges = linker.find_authoritative_links(repo_interfaces)
             self._logger.print_console(f"  Связей по архитектурному конфигу: {len(edges)}")
+        elif self._auto_links or not self._config.links:
+            # Авто-режим: связей в конфиге нет (или они игнорируются) —
+            # ищем обращения ко всем серверным эндпоинтам всех пар
+            edges = linker.find_auto_links(repo_interfaces)
+            self._logger.print_console(f"  Найдено кандидатов связей (авто-перебор): {len(edges)}")
+
+            if self._use_llm and self._confirm_links and edges:
+                validator = LinkValidatorLLM(
+                    self._model_name, self._temperature, "multi", self._max_query_num, self._logger
+                )
+                edges = confirm_edges(validator, edges)
+                self._logger.print_console(f"  Подтверждено связей: {len(edges)}")
         else:
             edges = linker.find_links(repo_interfaces)
             self._logger.print_console(f"  Найдено кандидатов связей: {len(edges)}")

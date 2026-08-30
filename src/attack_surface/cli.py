@@ -68,8 +68,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "project", help="Сканировать мульти-репозиторный проект (кросс-репо граф)"
     )
     proj.add_argument(
-        "--config", required=True,
+        "--config",
+        default=None,
         help="Путь к конфигурации проекта (JSON или Threagile YAML)",
+    )
+    proj.add_argument(
+        "--project-path",
+        default=None,
+        help="Корень проекта: конфиг составляется автоматически "
+        "(репозитории — подкаталоги с определяемым языком)",
+    )
+    proj.add_argument(
+        "--config-format", choices=["json", "threagile"], default="json",
+        help="Формат автосоставляемого конфига (по умолчанию json)",
     )
     proj.add_argument("--output-dir", default="./project_output", help="Каталог результатов")
     proj.add_argument(
@@ -78,6 +89,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     proj.add_argument("--model-name", default=None, help="Имя LLM-модели")
     proj.add_argument("--no-llm", action="store_true", help="Не использовать LLM (только статика)")
+    proj.add_argument(
+        "--auto-links", action="store_true",
+        help="Искать связи перебором всех пар репозиториев, игнорируя links из конфига",
+    )
 
     # --- export-threagile -----------------------------------------------
     exp = sub.add_parser(
@@ -331,12 +346,23 @@ def _cmd_project(args: argparse.Namespace) -> None:
     """Сканировать мульти-репозиторный проект."""
     from attack_surface._project_pipeline import ProjectScanner
 
+    if args.config and args.project_path:
+        raise SystemExit(
+            "Укажите только один из параметров: --config или --project-path"
+        )
+    if not args.config and not args.project_path:
+        raise SystemExit("Укажите --config или --project-path")
+
     output_dir = os.path.abspath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
     log_path = os.path.join(output_dir, "log", "project.log")
     logger = Logger(log_path)
 
-    config = _load_project_config(args.config)
+    if args.config:
+        config = _load_project_config(args.config)
+    else:
+        config = _build_auto_config(args.project_path, args.config_format, output_dir, logger)
+
     logger.print_console(f"Проект: {config.project} ({len(config.repos)} репозиториев)")
     logger.print_console(
         f"Режим связей: {'архитектурный (Threagile)' if config.links_authoritative else 'эвристический'}"
@@ -350,9 +376,30 @@ def _cmd_project(args: argparse.Namespace) -> None:
         use_llm=not args.no_llm,
         output_dir=output_dir,
         graph_format=args.graph_format,
+        auto_links=args.auto_links,
     )
     scanner.scan()
     logger.print_console("Готово.")
+
+
+def _build_auto_config(
+    project_path: str, config_format: str, output_dir: str, logger: Logger
+) -> ProjectConfig:
+    """Автосоставить конфигурацию по корневому каталогу и сохранить её."""
+    from attack_surface._auto_config import build_auto_config, save_auto_config
+
+    logger.print_console(f"Автосоставление конфигурации по каталогу: {project_path}")
+    config = build_auto_config(
+        project_path,
+        threagile=config_format == "threagile",
+    )
+    logger.print_console(
+        f"  Обнаружено репозиториев: {len(config.repos)}"
+        f" ({', '.join(r.name + ' (' + r.language + ')' for r in config.repos)})"
+    )
+    config_path = save_auto_config(config, output_dir, config_format)
+    logger.print_console(f"  Конфигурация сохранена: {config_path}")
+    return config
 
 
 def _cmd_export_threagile(args: argparse.Namespace) -> None:

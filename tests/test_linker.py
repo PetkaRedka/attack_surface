@@ -146,3 +146,48 @@ def test_find_authoritative_links_no_signature_match(tmp_path):
     assert len(edges) == 1
     assert edges[0].server_node_id == ""
     assert edges[0].client_node_id == ""
+
+
+def test_find_auto_links(tmp_path):
+    """Тест: авто-режим находит связь между парами репозиториев без links."""
+    config = _make_config(tmp_path, [])
+    (tmp_path / "frontend" / "api.js").write_text("fetch('/api/v1/orders');\n", encoding="utf-8")
+
+    linker = CrossRepoLinker(config, bidirectional=False)
+    edges = linker.find_auto_links({"backend": [_server_ep()], "frontend": []})
+
+    assert len(edges) >= 1
+    edge = edges[0]
+    assert edge.server_repo == "backend"
+    assert edge.client_repo == "frontend"
+    assert edge.link.type == "http"  # тип выводится из interface_kind эндпоинта
+
+
+def test_find_auto_links_deduplicates(tmp_path):
+    """Тест: авто-режим отбрасывает дубликаты совпадений по паттернам."""
+    config = _make_config(tmp_path, [])
+    (tmp_path / "frontend" / "api.js").write_text(
+        "fetch('/api/v1/orders');\n", encoding="utf-8"
+    )
+    # Сигнатура и алиас дают два паттерна, указывающих на одну строку
+    server = {**_server_ep(), "signature_aliases": ["/api/v1/orders"]}
+
+    linker = CrossRepoLinker(config, bidirectional=False)
+    edges = linker.find_auto_links({"backend": [server], "frontend": []})
+
+    assert len(edges) == 1
+
+
+def test_find_auto_links_kind_type(tmp_path):
+    """Тест: тип авто-связи выводится из interface_kind эндпоинта."""
+    config = _make_config(tmp_path, [])
+    (tmp_path / "frontend" / "mail.js").write_text(
+        "sendmail('user@example.com');\n", encoding="utf-8"
+    )
+    server = {**_server_ep(), "interface_kind": "email", "signature": "sendmail"}
+
+    linker = CrossRepoLinker(config, bidirectional=False)
+    edges = linker.find_auto_links({"backend": [server], "frontend": []})
+
+    assert len(edges) == 1
+    assert edges[0].link.type == "email"

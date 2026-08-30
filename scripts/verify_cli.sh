@@ -72,6 +72,18 @@ echo "--- project bedolaga (Threagile) ---"
 "$CLI" project --config test_projects/Bedolaga/threagile.yaml \
     --output-dir "$OUT/project-bedolaga" --no-llm
 
+echo "--- project store (auto-config, json) ---"
+"$CLI" project --project-path test_projects/store --config-format json \
+    --output-dir "$OUT/project-store-auto-json" --no-llm
+
+echo "--- project store (auto-config, threagile) ---"
+"$CLI" project --project-path test_projects/store --config-format threagile \
+    --output-dir "$OUT/project-store-auto-yaml" --no-llm
+
+echo "--- project store (auto-links по конфигу) ---"
+"$CLI" project --config test_projects/store/project.json --auto-links \
+    --output-dir "$OUT/project-store-auto-links" --no-llm
+
 echo "=== 5. Экспорт Threagile (export-threagile) ==="
 "$CLI" export-threagile \
     --config test_projects/store/project.json \
