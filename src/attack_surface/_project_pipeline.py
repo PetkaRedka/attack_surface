@@ -204,6 +204,24 @@ def _find_entrypoints_file(entrypoints_dir: str, repo_name: str) -> str | None:
     return None
 
 
+def _repo_checkpoint_dict(
+    repo: RepoConfig,
+    language: str,
+    entry_points: dict[str, EntryPointInfo],
+    interfaces: dict[str, InterfaceDescriptor],
+) -> dict[str, Any]:
+    """Словарь промежуточного результата сканирования репозитория."""
+    return {
+        "name": repo.name,
+        "language": language,
+        "role": repo.role,
+        "path": repo.path,
+        "total_entry_points": len(entry_points),
+        "entry_points": {k: v.to_dict() for k, v in entry_points.items()},
+        "interfaces": {k: v.to_dict() for k, v in interfaces.items()},
+    }
+
+
 def load_repo_scan_results(
     config: ProjectConfig,
     entrypoints_dir: str,
@@ -395,6 +413,10 @@ class ProjectScanner:
                         repo_results, edge.client_repo
                     )[node_id].function_name
 
+        # Чекпойнт: подтверждённые (или доверенные) межрепо связи
+        cross_edges_path = self._save_cross_edges(edges)
+        self._logger.print_console(f"  Подтверждённые связи: {cross_edges_path}")
+
         # Поверхность атаки большого графа
         attack_surface = self._compute_attack_surface(repo_results, edges)
 
@@ -408,6 +430,40 @@ class ProjectScanner:
         return result
 
     # ------------------------------------------------------------------
+
+    def _save_repo_checkpoint(
+        self,
+        repo: RepoConfig,
+        language: str,
+        entry_points: dict[str, EntryPointInfo],
+        interfaces: dict[str, InterfaceDescriptor],
+    ) -> str:
+        """Сохранить промежуточный результат сканирования репозитория.
+
+        Файл ``repos/<имя>_entry_points.json`` пишется на каждом этапе
+        (до и после LLM-валидации), чтобы при прерывании анализа можно
+        было продолжить с ``--entrypoints-dir``.
+
+        :return: абсолютный путь к файлу.
+        """
+        repos_dir = os.path.join(self._output_dir, "repos")
+        os.makedirs(repos_dir, exist_ok=True)
+        path = os.path.join(repos_dir, f"{repo.name}_entry_points.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(
+                _repo_checkpoint_dict(repo, language, entry_points, interfaces),
+                fh,
+                indent=2,
+                ensure_ascii=False,
+            )
+        return path
+
+    def _save_cross_edges(self, edges: list[CrossRepoEdge]) -> str:
+        """Сохранить подтверждённые межрепо связи как промежуточный результат."""
+        path = os.path.join(self._output_dir, "cross_edges.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump([e.to_dict() for e in edges], fh, indent=2, ensure_ascii=False)
+        return path
 
     def _confirm_edges_batch(self, edges: list[CrossRepoEdge]) -> list[CrossRepoEdge]:
         """Подтвердить кандидатов связей батчами (или без LLM)."""
@@ -441,7 +497,16 @@ class ProjectScanner:
         entry_points = extractor.build_entry_points()
         self._logger.print_console(f"  Точек входа: {len(entry_points)}")
 
+        # Чекпойнт: статически найденные точки входа (до LLM-валидации) —
+        # позволяет продолжить анализ при прерывании на валидации
+        self._save_repo_checkpoint(repo, language, entry_points, {})
+
         interfaces = self._analyze_interfaces(repo, language, entry_points)
+
+        # Чекпойнт: верифицированные точки входа и интерфейсы — готовы
+        # к пересборке через --entrypoints-dir без повторной валидации
+        self._save_repo_checkpoint(repo, language, entry_points, interfaces)
+
         return RepoScanResult(
             repo=repo,
             language=language,
@@ -596,7 +661,17 @@ class ProjectScanner:
             repo_entry_points[repo_result.repo.name] = eps
             path = os.path.join(repos_dir, f"{repo_result.repo.name}_entry_points.json")
             with open(path, "w", encoding="utf-8") as fh:
-                json.dump(repo_result.to_dict(), fh, indent=2, ensure_ascii=False)
+                json.dump(
+                    _repo_checkpoint_dict(
+                        repo_result.repo,
+                        repo_result.language,
+                        repo_result.entry_points,
+                        repo_result.interfaces,
+                    ),
+                    fh,
+                    indent=2,
+                    ensure_ascii=False,
+                )
 
         artifacts = generate_project_graph(
             self._config,
