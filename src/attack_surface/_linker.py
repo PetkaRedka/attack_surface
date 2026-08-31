@@ -47,6 +47,26 @@ class CrossRepoEdge:
     confidence: str = "medium"       # high | medium | low
     direction: str = "forward"       # forward | reverse
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CrossRepoEdge":
+        """Восстановить ребро из JSON (см. ``to_dict``)."""
+        return cls(
+            link=LinkConfig.from_dict(data.get("link", {})),
+            server_repo=str(data.get("server_repo", "")),
+            server_node_id=str(data.get("server_node_id", "")),
+            server_function_name=str(data.get("server_function_name", "")),
+            server_signature=str(data.get("server_signature", "")),
+            client_repo=str(data.get("client_repo", "")),
+            client_file=str(data.get("client_file", "")),
+            client_line=int(data.get("client_line", 0)),
+            client_snippet=str(data.get("client_snippet", "")),
+            client_node_id=str(data.get("client_node_id", "")),
+            client_function_name=str(data.get("client_function_name", "")),
+            match_kind=str(data.get("match_kind", "exact")),
+            confidence=str(data.get("confidence", "medium")),
+            direction=str(data.get("direction", "forward")),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "link": self.link.to_dict(),

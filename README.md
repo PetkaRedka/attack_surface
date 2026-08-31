@@ -129,6 +129,15 @@ attack-surface project --config project.json --auto-links --output-dir ./out --n
 # Пересобрать граф из уже проверенных точек входа (этап нахождения пропущен)
 attack-surface project --config project.json --entrypoints-dir ./out/repos --output-dir ./out2 --no-llm
 
+# Сразу CERT и SVG в одном прогоне
+attack-surface project --config project.json --output-dir ./out --graph-format both
+
+# Пересобрать CERT/SVG из готового project_scan.json (без сканирования и LLM)
+attack-surface project --from-scan ./out/project_scan.json --output-dir ./out --graph-format cert
+
+# Отрисовать CERT+SVG схему топологии из архитектурного файла Threagile (без анализа кода)
+attack-surface render-threagile --config threagile.yaml --output-dir ./topology --graph-format both
+
 # Сгенерировать архитектурный файл Threagile из JSON-конфига
 attack-surface export-threagile --config project.json --output threagile.yaml
 ```
@@ -171,6 +180,20 @@ attack-surface project --config project.json --entrypoints-dir ./out/repos --out
 и цепочки считаются по кросс-репо связям (внутрирепозиторные вызовы
 в этом режиме не учитываются — для них нужен полный прогон).
 
+### Пересборка графа из артефактов
+
+- `project --from-scan <project_scan.json>` — пересобирает граф (CERT/SVG)
+  из сохранённого `project_scan.json`: сканирование, LLM и линковка не
+  выполняются, используются уже найденные точки входа, связи и
+  поверхность атаки.
+- `render-threagile --config threagile.yaml` — отрисовывает схему
+  **топологии** (узлы — репозитории, рёбра — связи из `data_flows`)
+  в CERT и/или SVG без анализа кода. Удобно для быстрой визуализации
+  архитектурного файла, в том числе после того, как в него записаны
+  найденные связи.
+- `--graph-format both` у `project` и `render-threagile` генерирует
+  CERT и SVG сразу.
+
 ### Промежуточные результаты (чекпойнты)
 
 При обычном запуске `project` промежуточные результаты сохраняются на
@@ -193,6 +216,15 @@ attack-surface project --config <проект>.auto.json \
 
 Финальные артефакты (`project_graph.json`, `project_scan.json`, схема ПА)
 появятся при успешном завершении.
+
+### Найденные связи в архитектурном файле
+
+Автосоставленный Threagile-файл создаётся до анализа с пустыми
+`data_flows`. После завершения `project` найденные связи записываются
+в него (`update_threagile_data_flows`): существующие потоки сохраняются,
+дубликаты по паре `(source, target, protocol)` исключаются. Такой файл
+можно передать архитектору или сразу отрисовать из него топологию
+командой `render-threagile`.
 
 ### Подтверждение связей батчами
 

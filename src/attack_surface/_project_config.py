@@ -109,6 +109,15 @@ class LinkConfig:
     to_repo: str
     type: str = LinkType.HTTP.value
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "LinkConfig":
+        """Восстановить связь из JSON (см. ``to_dict``)."""
+        return cls(
+            from_repo=str(data.get("from", "")),
+            to_repo=str(data.get("to", "")),
+            type=str(data.get("type", LinkType.HTTP.value)),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {"from": self.from_repo, "to": self.to_repo, "type": self.type}
 

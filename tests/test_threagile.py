@@ -4,6 +4,7 @@ import os
 
 import yaml
 
+from attack_surface._linker import CrossRepoEdge
 from attack_surface._project_config import (
     LinkConfig,
     LinkType,
@@ -21,6 +22,7 @@ from attack_surface._threagile import (
     load_threagile,
     protocol_for_link_type,
     save_threagile,
+    update_threagile_data_flows,
 )
 
 
@@ -129,3 +131,40 @@ def test_build_threagile_model():
     assert "threagile_version" in model
     assert "technical_assets" in model
     assert "data_flows" in model
+
+
+def _edge() -> CrossRepoEdge:
+    return CrossRepoEdge(
+        link=LinkConfig(from_repo="frontend", to_repo="backend", type="http"),
+        server_repo="backend",
+        server_node_id="b1",
+        server_function_name="CreateOrder",
+        server_signature="/api/v1/orders",
+        client_repo="frontend",
+        client_file="/frontend/api.js",
+        client_line=2,
+    )
+
+
+def test_update_threagile_data_flows(tmp_path):
+    """Тест: найденные связи записываются в data_flows архитектурного файла."""
+    path = save_threagile(_config(), str(tmp_path / "threagile.yaml"))
+
+    update_threagile_data_flows(_config(), [_edge()], path)
+
+    data = yaml.safe_load(open(path, encoding="utf-8"))
+    flows = data["data_flows"]
+    assert len(flows) == 1
+    assert flows[0]["source"] == "frontend"
+    assert flows[0]["target"] == "backend"
+    assert flows[0]["protocol"] == "https"  # http → https (шифрованный дефолт)
+
+
+def test_update_threagile_data_flows_keeps_existing(tmp_path):
+    """Тест: существующие data_flows сохраняются, дубликаты исключаются."""
+    path = save_threagile(_config(), str(tmp_path / "threagile.yaml"))
+
+    update_threagile_data_flows(_config(), [_edge(), _edge()], path)
+
+    data = yaml.safe_load(open(path, encoding="utf-8"))
+    assert len(data["data_flows"]) == 1  # дубликат по (source, target, protocol) отброшен

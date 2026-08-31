@@ -18,7 +18,11 @@ from typing import Any
 from attack_surface._attack_surface import ReachabilityResult
 from attack_surface._graph import _group_into_modules, module_name_for_path
 from attack_surface._linker import CrossRepoEdge
-from attack_surface._project_config import ProjectConfig
+from attack_surface._project_config import (
+    LinkConfig,
+    ProjectConfig,
+    RepoConfig,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +127,10 @@ def generate_project_graph(
 # ---------------------------------------------------------------------------
 
 def _generate_cert(
-    model: dict[str, Any], node_to_file: dict[str, str], output_dir: str
+    model: dict[str, Any],
+    node_to_file: dict[str, str],
+    output_dir: str,
+    basename: str = "project_attack_surface",
 ) -> str:
     node_data: list[dict[str, Any]] = []
     link_data: list[dict[str, Any]] = []
@@ -133,11 +140,13 @@ def _generate_cert(
     group_key = -2
     node_key = 1
     module_keys: dict[tuple[str, str], int] = {}
+    repo_group_keys: dict[str, int] = {}
 
     repo_y = 80
     for repo in model["repos"]:
         gkey = group_key
         group_key -= 1
+        repo_group_keys[repo["name"]] = gkey
         node_data.append(
             {
                 "text": f"{repo['name']} ({repo['role'] or repo['language']})",
@@ -164,23 +173,39 @@ def _generate_cert(
             )
         repo_y += 240
 
-    # Рёбра связей между модулями разных репозиториев
+    # Рёбра связей между модулями разных репозиториев.
+    # Если конкретные эндпоинты не сопоставлены (пустой ``edges``) —
+    # связь рисуется на уровне репозиториев (между группами).
     for link in model["links"]:
-        for edge in link["edges"]:
-            client_mod = module_name_for_path(edge.get("client_file", ""))
-            server_mod = module_name_for_path(node_to_file.get(edge.get("server_node_id", ""), ""))
-            src_key = module_keys.get((edge.get("client_repo", ""), client_mod))
-            dst_key = module_keys.get((edge.get("server_repo", ""), server_mod))
-            if src_key is None or dst_key is None or src_key == dst_key:
-                continue
-            link_data.append(
-                {
-                    "from": src_key,
-                    "to": dst_key,
-                    "text": link["type"],
-                    "dash": [2, 2],
-                }
-            )
+        if link["edges"]:
+            for edge in link["edges"]:
+                client_mod = module_name_for_path(edge.get("client_file", ""))
+                server_mod = module_name_for_path(node_to_file.get(edge.get("server_node_id", ""), ""))
+                src_key = module_keys.get((edge.get("client_repo", ""), client_mod))
+                dst_key = module_keys.get((edge.get("server_repo", ""), server_mod))
+                if src_key is None or dst_key is None or src_key == dst_key:
+                    continue
+                link_data.append(
+                    {
+                        "from": src_key,
+                        "to": dst_key,
+                        "text": link["type"],
+                        "dash": [2, 2],
+                    }
+                )
+            continue
+        src_key = repo_group_keys.get(link["from"])
+        dst_key = repo_group_keys.get(link["to"])
+        if src_key is None or dst_key is None or src_key == dst_key:
+            continue
+        link_data.append(
+            {
+                "from": src_key,
+                "to": dst_key,
+                "text": link["type"],
+                "dash": [2, 2],
+            }
+        )
 
     cert = {
         "class": "GraphLinksModel",
@@ -189,7 +214,7 @@ def _generate_cert(
         "nodeDataArray": node_data,
         "linkDataArray": link_data,
     }
-    out_file = os.path.join(output_dir, "project_attack_surface.json")
+    out_file = os.path.join(output_dir, f"{basename}.json")
     with open(out_file, "w", encoding="utf-8") as fh:
         json.dump(cert, fh, ensure_ascii=False)
     return out_file
@@ -199,7 +224,9 @@ def _generate_cert(
 # SVG
 # ---------------------------------------------------------------------------
 
-def _generate_svg(model: dict[str, Any], output_dir: str) -> str:
+def _generate_svg(
+    model: dict[str, Any], output_dir: str, basename: str = "project_attack_surface"
+) -> str:
     repos = model["repos"]
     repo_h = 120
     repo_gap = 60
@@ -238,25 +265,137 @@ def _generate_svg(model: dict[str, Any], output_dir: str) -> str:
         )
         y += repo_h + repo_gap
 
-    # Рёбра связей
+    # Рёбра связей. Если конкретные эндпоинты не сопоставлены —
+    # связь рисуется на уровне репозиториев (без пометки числа рёбер).
     for link in model["links"]:
-        if not link["edges"]:
-            continue
         src = repo_centers.get(link["from"])
         dst = repo_centers.get(link["to"])
         if src is None or dst is None:
             continue
+        label = (
+            f'{link["type"]} ({len(link["edges"])})'
+            if link["edges"]
+            else link["type"]
+        )
         svg += (
             f'  <line x1="{src[0]}" y1="{src[1] + 55}" x2="{dst[0]}" y2="{dst[1] - 55}" '
             f'stroke="#000" stroke-width="1" marker-end="url(#arrowhead)"/>\n'
             f'  <text x="{(src[0] + dst[0]) / 2 + 8}" y="{(src[1] + dst[1]) / 2}" '
             f'font-family="Arial, sans-serif" font-size="9" fill="#000">'
-            f'{link["type"]} ({len(link["edges"])})</text>\n'
+            f'{label}</text>\n'
         )
 
     svg += "</svg>\n"
 
-    out_file = os.path.join(output_dir, "project_attack_surface.svg")
+    out_file = os.path.join(output_dir, f"{basename}.svg")
     with open(out_file, "w", encoding="utf-8") as fh:
         fh.write(svg)
     return out_file
+
+
+# ---------------------------------------------------------------------------
+# Пересборка из project_scan.json и топология из конфига
+# ---------------------------------------------------------------------------
+
+def generate_project_graph_from_scan(
+    scan_path: str,
+    output_dir: str,
+    *,
+    output_format: str = "svg",
+) -> dict[str, str]:
+    """Пересобрать кросс-репо граф (CERT/SVG) из сохранённого ``project_scan.json``.
+
+    Сканирование, LLM-валидация и линковка не выполняются: точки входа,
+    найденные связи и поверхность атаки восстанавливаются из JSON.
+
+    :return: словарь ``{имя_файла: путь}`` для созданных артефактов.
+    """
+    scan_path = os.path.abspath(scan_path)
+    if not os.path.isfile(scan_path):
+        raise ValueError(f"Файл project_scan.json не найден: {scan_path}")
+    with open(scan_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError(f"Некорректный JSON в файле: {scan_path}")
+
+    config = _config_from_scan(data, os.path.dirname(scan_path))
+    repo_entry_points: dict[str, dict[str, Any]] = {
+        repo["name"]: repo.get("entry_points") or {}
+        for repo in data.get("repos", [])
+        if isinstance(repo, dict)
+    }
+    edges = [
+        CrossRepoEdge.from_dict(edge)
+        for edge in data.get("edges", [])
+        if isinstance(edge, dict)
+    ]
+    attack_surface = (
+        ReachabilityResult.from_dict(data["attack_surface"])
+        if isinstance(data.get("attack_surface"), dict)
+        else None
+    )
+
+    return generate_project_graph(
+        config,
+        repo_entry_points,
+        edges,
+        output_dir,
+        output_format=output_format,
+        attack_surface=attack_surface,
+    )
+
+
+def generate_repo_topology_graph(
+    config: ProjectConfig,
+    output_dir: str,
+    *,
+    output_format: str = "both",
+) -> dict[str, str]:
+    """Отрисовать схему топологии репозиториев из конфига без анализа кода.
+
+    Узлы — репозитории, рёбра — связи из конфига (для Threagile —
+    ``data_flows``). Используется для быстрой визуализации архитектурного
+    файла, в том числе после того, как в него записаны найденные связи.
+
+    :return: словарь ``{имя_файла: путь}`` для созданных артефактов.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    model = build_project_graph_model(config, {}, [], None)
+
+    artifacts: dict[str, str] = {}
+    if output_format in ("cert", "both"):
+        artifacts["project_topology.json"] = _generate_cert(
+            model, {}, output_dir, basename="project_topology"
+        )
+    if output_format in ("svg", "both"):
+        artifacts["project_topology.svg"] = _generate_svg(
+            model, output_dir, basename="project_topology"
+        )
+    return artifacts
+
+
+def _config_from_scan(data: dict[str, Any], base_dir: str) -> ProjectConfig:
+    """Восстановить ProjectConfig из содержимого project_scan.json."""
+    repos: list[RepoConfig] = []
+    for repo in data.get("repos", []):
+        if not isinstance(repo, dict):
+            continue
+        repos.append(
+            RepoConfig(
+                name=str(repo.get("name", "")),
+                path=str(repo.get("path", "")),
+                language=str(repo.get("language", "")),
+                role=str(repo.get("role", "")),
+            )
+        )
+    links = [
+        LinkConfig.from_dict(link)
+        for link in data.get("links", [])
+        if isinstance(link, dict)
+    ]
+    return ProjectConfig(
+        project=str(data.get("project", "project")),
+        repos=repos,
+        links=links,
+        base_dir=base_dir,
+    )

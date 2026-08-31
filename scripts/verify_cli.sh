@@ -94,6 +94,14 @@ echo "=== 5. Экспорт Threagile (export-threagile) ==="
     --config test_projects/store/project.json \
     --output "$OUT/threagile-export.yaml"
 
+echo "=== 5.1 Пересборка графа из project_scan.json (--from-scan) ==="
+"$CLI" project --from-scan "$OUT/project-store/project_scan.json" \
+    --output-dir "$OUT/from-scan" --graph-format cert
+
+echo "=== 5.2 Отрисовка топологии из Threagile (render-threagile) ==="
+"$CLI" render-threagile --config test_projects/multi-service/threagile.yaml \
+    --output-dir "$OUT/render-threagile" --graph-format both
+
 echo "=== 6. Проверка артефактов ==="
 "$PYTHON" attack_surface/scripts/verify_artifacts.py "$OUT"
 

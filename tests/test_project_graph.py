@@ -3,9 +3,15 @@
 import json
 import os
 
+from attack_surface._attack_surface import ReachabilityResult
 from attack_surface._linker import CrossRepoEdge
 from attack_surface._project_config import LinkConfig, ProjectConfig, RepoConfig
-from attack_surface._project_graph import build_project_graph_model, generate_project_graph
+from attack_surface._project_graph import (
+    build_project_graph_model,
+    generate_project_graph,
+    generate_project_graph_from_scan,
+    generate_repo_topology_graph,
+)
 
 
 def _config(tmp_path):
@@ -105,3 +111,71 @@ def test_generate_project_graph_cert(tmp_path):
     assert data["class"] == "GraphLinksModel"
     assert "nodeDataArray" in data
     assert "linkDataArray" in data
+
+
+def test_generate_project_graph_from_scan(tmp_path):
+    """Тест: пересборка CERT/SVG из сохранённого project_scan.json."""
+    config = _config(tmp_path)
+    edges = [_edge()]
+    attack_surface = ReachabilityResult(
+        sources=[{"repo": "backend", "node_id": "b1"}],
+        reachable=[{"repo": "backend", "node_id": "b1"}],
+        chains=[],
+    )
+
+    # Формируем project_scan.json так же, как это делает project
+    scan = {
+        "project": "x",
+        "repos": [
+            {
+                "name": "frontend", "language": "javascript", "role": "ui",
+                "path": str(tmp_path / "frontend"),
+                "entry_points": _entry_points()["frontend"],
+                "interfaces": {},
+            },
+            {
+                "name": "backend", "language": "c_sharp", "role": "api",
+                "path": str(tmp_path / "backend"),
+                "entry_points": _entry_points()["backend"],
+                "interfaces": {},
+            },
+        ],
+        "links": [link.to_dict() for link in config.links],
+        "edges": [e.to_dict() for e in edges],
+        "attack_surface": attack_surface.to_dict(),
+    }
+    scan_path = tmp_path / "project_scan.json"
+    with open(scan_path, "w", encoding="utf-8") as fh:
+        json.dump(scan, fh)
+
+    output_dir = str(tmp_path / "out")
+    artifacts = generate_project_graph_from_scan(
+        str(scan_path), output_dir, output_format="cert"
+    )
+
+    assert "project_graph.json" in artifacts
+    assert "project_attack_surface.json" in artifacts
+    with open(artifacts["project_attack_surface.json"], "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    assert data["class"] == "GraphLinksModel"
+    assert len(data["linkDataArray"]) == 1
+
+
+def test_generate_repo_topology_graph(tmp_path):
+    """Тест: топология из конфига рисует связи на уровне репозиториев."""
+    output_dir = str(tmp_path / "out")
+    artifacts = generate_repo_topology_graph(
+        _config(tmp_path), output_dir, output_format="both"
+    )
+
+    assert "project_topology.json" in artifacts
+    assert "project_topology.svg" in artifacts
+
+    with open(artifacts["project_topology.json"], "r", encoding="utf-8") as fh:
+        cert = json.load(fh)
+    assert cert["class"] == "GraphLinksModel"
+    assert len(cert["linkDataArray"]) == 1  # связь между группами репозиториев
+
+    with open(artifacts["project_topology.svg"], "r", encoding="utf-8") as fh:
+        svg = fh.read()
+    assert "http" in svg  # подпись ребра на уровне репозиториев

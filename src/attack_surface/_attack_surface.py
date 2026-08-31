@@ -32,6 +32,15 @@ class AttackChain:
     source_node_id: str
     hops: list[dict[str, Any]] = field(default_factory=list)
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AttackChain":
+        """Восстановить цепочку из JSON (см. ``to_dict``)."""
+        return cls(
+            source_repo=str(data.get("source_repo", "")),
+            source_node_id=str(data.get("source_node_id", "")),
+            hops=list(data.get("hops", [])),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "source_repo": self.source_repo,
@@ -47,6 +56,19 @@ class ReachabilityResult:
     sources: list[dict[str, Any]] = field(default_factory=list)
     reachable: list[dict[str, Any]] = field(default_factory=list)
     chains: list[AttackChain] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ReachabilityResult":
+        """Восстановить результат из JSON (см. ``to_dict``)."""
+        return cls(
+            sources=list(data.get("sources", [])),
+            reachable=list(data.get("reachable", [])),
+            chains=[
+                AttackChain.from_dict(c)
+                for c in data.get("chains", [])
+                if isinstance(c, dict)
+            ],
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {

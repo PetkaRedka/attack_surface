@@ -352,3 +352,59 @@ def save_threagile(config: ProjectConfig, output_path: str) -> str:
     with open(output_path, "w", encoding="utf-8") as fh:
         fh.write(dump_threagile(config))
     return output_path
+
+
+def update_threagile_data_flows(
+    config: ProjectConfig,
+    edges: list[Any],
+    output_path: str,
+) -> str:
+    """Дополнить ``data_flows`` архитектурного файла найденными связями.
+
+    Автосоставленный Threagile-файл создаётся до анализа с пустыми
+    ``data_flows``; после линковки найденные связи записываются в него,
+    чтобы архитектор видел реальные взаимодействия. Существующие потоки
+    сохраняются, дубликаты по паре ``(source, target, protocol)``
+    исключаются.
+
+    :param edges: подтверждённые межрепо связи (``CrossRepoEdge``).
+    :return: абсолютный путь к обновлённому файлу.
+    """
+    output_path = os.path.abspath(output_path)
+    with open(output_path, encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Некорректный Threagile-файл: {output_path}")
+
+    flows: list[dict[str, Any]] = list(data.get("data_flows") or [])
+    by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for flow in flows:
+        if isinstance(flow, dict):
+            key = (
+                str(flow.get("source", "")),
+                str(flow.get("target", "")),
+                str(flow.get("protocol", "")),
+            )
+            by_key[key] = flow
+
+    for edge in edges:
+        link = getattr(edge, "link", None)
+        if link is None:
+            continue
+        protocol = protocol_for_link_type(link.type)
+        key = (link.from_repo, link.to_repo, protocol)
+        if key in by_key:
+            continue
+        by_key[key] = {
+            "id": f"flow-{len(by_key) + 1}",
+            "description": f"{link.from_repo} → {link.to_repo} ({link.type})",
+            "source": link.from_repo,
+            "target": link.to_repo,
+            "protocol": protocol,
+            "tags": [],
+        }
+
+    data["data_flows"] = list(by_key.values())
+    with open(output_path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump(data, fh, sort_keys=False, allow_unicode=True)
+    return output_path

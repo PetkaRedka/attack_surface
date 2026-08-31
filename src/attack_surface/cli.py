@@ -84,8 +84,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     proj.add_argument("--output-dir", default="./project_output", help="Каталог результатов")
     proj.add_argument(
-        "--graph-format", choices=["svg", "cert"], default="svg",
-        help="Формат визуализации графа",
+        "--graph-format", choices=["svg", "cert", "both"], default="svg",
+        help="Формат визуализации графа (both — CERT и SVG сразу)",
     )
     proj.add_argument("--model-name", default=None, help="Имя LLM-модели")
     proj.add_argument("--no-llm", action="store_true", help="Не использовать LLM (только статика)")
@@ -98,6 +98,26 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Каталог с проверенными точками входа (repos/*_entry_points.json): "
         "этап нахождения точек входа внутри репозиториев пропускается",
+    )
+    proj.add_argument(
+        "--from-scan",
+        default=None,
+        metavar="PROJECT_SCAN_JSON",
+        help="Пересобрать граф (CERT/SVG) из готового project_scan.json "
+        "без сканирования и LLM",
+    )
+
+    # --- render-threagile -----------------------------------------------
+    rend = sub.add_parser(
+        "render-threagile",
+        help="Отрисовать CERT/SVG схему топологии из архитектурного файла "
+        "Threagile (без анализа кода)",
+    )
+    rend.add_argument("--config", required=True, help="Путь к архитектурному файлу Threagile")
+    rend.add_argument("--output-dir", default="./threagile_render", help="Каталог результатов")
+    rend.add_argument(
+        "--graph-format", choices=["svg", "cert", "both"], default="both",
+        help="Формат визуализации (по умолчанию both — CERT и SVG)",
     )
 
     # --- export-threagile -----------------------------------------------
@@ -123,6 +143,8 @@ def main(argv: list[str] | None = None) -> None:
         _cmd_call_graph(args)
     elif args.command == "project":
         _cmd_project(args)
+    elif args.command == "render-threagile":
+        _cmd_render_threagile(args)
     elif args.command == "export-threagile":
         _cmd_export_threagile(args)
 
@@ -352,6 +374,10 @@ def _cmd_project(args: argparse.Namespace) -> None:
     """Сканировать мульти-репозиторный проект."""
     from attack_surface._project_pipeline import ProjectScanner
 
+    if args.from_scan:
+        _cmd_project_from_scan(args)
+        return
+
     if args.config and args.project_path:
         raise SystemExit(
             "Укажите только один из параметров: --config или --project-path"
@@ -364,10 +390,13 @@ def _cmd_project(args: argparse.Namespace) -> None:
     log_path = os.path.join(output_dir, "log", "project.log")
     logger = Logger(log_path)
 
+    auto_config_path: str | None = None
     if args.config:
         config = _load_project_config(args.config)
     else:
-        config = _build_auto_config(args.project_path, args.config_format, output_dir, logger)
+        config, auto_config_path = _build_auto_config(
+            args.project_path, args.config_format, output_dir, logger
+        )
 
     logger.print_console(f"Проект: {config.project} ({len(config.repos)} репозиториев)")
     logger.print_console(
@@ -385,14 +414,74 @@ def _cmd_project(args: argparse.Namespace) -> None:
         auto_links=args.auto_links,
         entrypoints_dir=args.entrypoints_dir,
     )
-    scanner.scan()
+    result = scanner.scan()
+
+    # Автосоставленный Threagile-файл создаётся до анализа с пустыми
+    # data_flows — записываем в него найденные связи
+    if auto_config_path and args.config_format == "threagile":
+        from attack_surface._threagile import update_threagile_data_flows
+
+        updated = update_threagile_data_flows(config, result.edges, auto_config_path)
+        logger.print_console(f"  Найденные связи записаны в архитектурный файл: {updated}")
+
+    logger.print_console("Готово.")
+
+
+def _cmd_project_from_scan(args: argparse.Namespace) -> None:
+    """Пересобрать граф (CERT/SVG) из сохранённого project_scan.json.
+
+    Сканирование, LLM-валидация и линковка не выполняются — используется
+    только переданный файл с результатами.
+    """
+    from attack_surface._project_graph import generate_project_graph_from_scan
+
+    output_dir = os.path.abspath(args.output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(output_dir, "log", "project.log")
+    logger = Logger(log_path)
+
+    logger.print_console(f"Пересборка графа из: {args.from_scan}")
+    artifacts = generate_project_graph_from_scan(
+        args.from_scan,
+        output_dir,
+        output_format=args.graph_format,
+    )
+    for name, path in artifacts.items():
+        logger.print_console(f"  {name}: {path}")
+    logger.print_console("Готово.")
+
+
+def _cmd_render_threagile(args: argparse.Namespace) -> None:
+    """Отрисовать CERT/SVG схему топологии из архитектурного файла."""
+    from attack_surface._project_graph import generate_repo_topology_graph
+
+    config = _load_project_config(args.config)
+    output_dir = os.path.abspath(args.output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(output_dir, "log", "project.log")
+    logger = Logger(log_path)
+
+    logger.print_console(
+        f"Схема топологии: {config.project} ({len(config.repos)} репозиториев, "
+        f"{len(config.links)} связей)"
+    )
+    artifacts = generate_repo_topology_graph(
+        config,
+        output_dir,
+        output_format=args.graph_format,
+    )
+    for name, path in artifacts.items():
+        logger.print_console(f"  {name}: {path}")
     logger.print_console("Готово.")
 
 
 def _build_auto_config(
     project_path: str, config_format: str, output_dir: str, logger: Logger
-) -> ProjectConfig:
-    """Автосоставить конфигурацию по корневому каталогу и сохранить её."""
+) -> tuple[ProjectConfig, str]:
+    """Автосоставить конфигурацию по корневому каталогу и сохранить её.
+
+    :return: кортеж ``(конфиг, путь к сохранённому файлу)``.
+    """
     from attack_surface._auto_config import build_auto_config, save_auto_config
 
     logger.print_console(f"Автосоставление конфигурации по каталогу: {project_path}")
@@ -406,7 +495,7 @@ def _build_auto_config(
     )
     config_path = save_auto_config(config, output_dir, config_format)
     logger.print_console(f"  Конфигурация сохранена: {config_path}")
-    return config
+    return config, config_path
 
 
 def _cmd_export_threagile(args: argparse.Namespace) -> None:
