@@ -104,3 +104,51 @@ def test_invalid_link_type_raises(tmp_path):
 
     with pytest.raises(ValueError):
         load_project_config(config_path)
+
+
+def test_load_config_with_modules(tmp_path):
+    """Тест: модули репозитория загружаются из конфига."""
+    repo = tmp_path / "backend"
+    (repo / "core").mkdir(parents=True)
+    config_path = tmp_path / "project.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "project": "x",
+                "repos": [
+                    {
+                        "name": "backend", "path": "./backend",
+                        "language": "python", "modules": ["core"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_project_config(str(config_path))
+
+    assert config.repos[0].modules == ["core"]
+
+
+def test_missing_module_dir_raises(tmp_path):
+    """Тест: несуществующий каталог модуля вызывает ошибку."""
+    (tmp_path / "backend").mkdir()
+    config_path = tmp_path / "project.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "project": "x",
+                "repos": [
+                    {
+                        "name": "backend", "path": "./backend",
+                        "language": "python", "modules": ["ghost"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        load_project_config(str(config_path))

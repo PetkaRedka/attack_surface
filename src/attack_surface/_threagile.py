@@ -251,12 +251,15 @@ def load_threagile(path: str) -> ProjectConfig:
             continue
         technology = str(asset.get("technology", "")).strip()
         role = str(asset.get("description", "")).strip() or str(asset.get("type", "")).strip()
+        # Модули — git-поддиректории репозитория (подраздел актива)
+        modules = [str(m).strip() for m in (asset.get("modules") or []) if str(m).strip()]
         repos.append(
             RepoConfig(
                 name=name,
                 path=os.path.join(base_dir, name),
                 language=language_for_technology(technology),
                 role=role,
+                modules=modules,
             )
         )
 
@@ -296,15 +299,16 @@ def build_threagile_model(config: ProjectConfig) -> dict[str, Any]:
     """Построить модель Threagile из ProjectConfig (в рамках доступных полей)."""
     assets: list[dict[str, Any]] = []
     for repo in config.repos:
-        assets.append(
-            {
-                "id": repo.name,
-                "description": repo.role or repo.name,
-                "type": "process",
-                "technology": technology_for_language(repo.language),
-                "tags": [],
-            }
-        )
+        asset: dict[str, Any] = {
+            "id": repo.name,
+            "description": repo.role or repo.name,
+            "type": "process",
+            "technology": technology_for_language(repo.language),
+            "tags": [],
+        }
+        if repo.modules:
+            asset["modules"] = list(repo.modules)
+        assets.append(asset)
 
     flows: list[dict[str, Any]] = []
     for index, link in enumerate(config.links, 1):

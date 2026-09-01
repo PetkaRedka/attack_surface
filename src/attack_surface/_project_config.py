@@ -85,12 +85,19 @@ def normalize_language(name: str) -> str:
 
 @dataclass
 class RepoConfig:
-    """Описание одного репозитория проекта."""
+    """Описание одного репозитория проекта.
+
+    Модули — git-поддиректории внутри репозитория (имена каталогов
+    с маркером ``.git``); у репозитория может не быть модулей.
+    Каталоги кода внутри репозитория/модуля называются исходниками
+    (в графе — ``sources``).
+    """
 
     name: str
     path: str
     language: str
     role: str = ""
+    modules: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -98,6 +105,7 @@ class RepoConfig:
             "path": self.path,
             "language": self.language,
             "role": self.role,
+            "modules": list(self.modules),
         }
 
 
@@ -217,12 +225,27 @@ def _parse_repos(raw_repos: Any, base_dir: str) -> list[RepoConfig]:
         if not raw_lang:
             raise ValueError(f"Репозиторий '{name}' должен иметь поле 'language'")
 
+        # Модули — имена подкаталогов репозитория (git-директории ниже по иерархии)
+        modules: list[str] = []
+        for module in item.get("modules", []) or []:
+            module_name = str(module).strip()
+            if not module_name:
+                continue
+            module_path = os.path.normpath(os.path.join(resolved, module_name))
+            if not os.path.isdir(module_path):
+                raise ValueError(
+                    f"Каталог модуля '{module_name}' репозитория '{name}' не найден: "
+                    f"{module_path}"
+                )
+            modules.append(module_name)
+
         repos.append(
             RepoConfig(
                 name=name,
                 path=resolved,
                 language=normalize_language(raw_lang),
                 role=str(item.get("role", "")).strip(),
+                modules=modules,
             )
         )
     return repos

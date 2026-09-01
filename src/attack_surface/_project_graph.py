@@ -25,6 +25,24 @@ from attack_surface._project_config import (
 )
 
 
+def _source_module(repo: RepoConfig, file_path: str) -> str:
+    """Самый глубокий модуль репозитория, которому принадлежит исходник.
+
+    Привязка идёт по самому длинному совпадающему префиксу пути
+    (``pizda/bobik`` важнее ``pizda``); пусто — исходник вне модулей.
+    """
+    if not file_path or not repo.modules:
+        return ""
+    norm = os.path.normpath(file_path).replace("\\", "/").lower()
+    base = os.path.normpath(repo.path).replace("\\", "/").lower()
+    best = ""
+    for module in repo.modules:
+        prefix = f"{base}/{module.rstrip('/').replace(chr(92), '/').lower()}/"
+        if norm.startswith(prefix) and len(module) > len(best):
+            best = module
+    return best
+
+
 # ---------------------------------------------------------------------------
 # Машиночитаемая модель графа
 # ---------------------------------------------------------------------------
@@ -35,16 +53,28 @@ def build_project_graph_model(
     cross_edges: list[CrossRepoEdge],
     attack_surface: ReachabilityResult | None = None,
 ) -> dict[str, Any]:
-    """Построить машиночитаемую модель кросс-репо графа."""
+    """Построить машиночитаемую модель кросс-репо графа.
+
+    Иерархия: репозиторий → модули (git-поддиректории) и исходники
+    (каталоги с точками входа). Исходник, лежащий внутри каталога
+    модуля, привязывается к нему полем ``module``.
+    """
     repos: list[dict[str, Any]] = []
     for repo in config.repos:
         eps = repo_entry_points.get(repo.name, {})
         modules_map = _group_into_modules(eps, repo.language)
-        modules: list[dict[str, Any]] = []
+        sources: list[dict[str, Any]] = []
         for mod_name, mod_data in modules_map.items():
             types = {t for ep in mod_data["entry_points"] for t in ep.get("types", [])}
-            modules.append({"name": mod_name, "types": sorted(types)})
-        modules.sort(key=lambda m: m["name"])
+            first_file = mod_data["entry_points"][0].get("file", "") if mod_data["entry_points"] else ""
+            sources.append(
+                {
+                    "name": mod_name,
+                    "types": sorted(types),
+                    "module": _source_module(repo, first_file),
+                }
+            )
+        sources.sort(key=lambda s: s["name"])
         repos.append(
             {
                 "name": repo.name,
@@ -52,7 +82,8 @@ def build_project_graph_model(
                 "role": repo.role,
                 "path": repo.path,
                 "total_entry_points": len(eps),
-                "modules": modules,
+                "modules": list(repo.modules),
+                "sources": sources,
             }
         )
 
@@ -139,7 +170,7 @@ def _generate_cert(
 
     group_key = -2
     node_key = 1
-    module_keys: dict[tuple[str, str], int] = {}
+    source_keys: dict[tuple[str, str], int] = {}
     repo_group_keys: dict[str, int] = {}
 
     repo_y = 80
@@ -157,16 +188,33 @@ def _generate_cert(
             }
         )
 
-        for i, mod in enumerate(repo["modules"]):
+        # Группы git-модулей репозитория
+        module_group_keys: dict[str, int] = {}
+        for module in repo.get("modules", []):
+            mkey = group_key
+            group_key -= 1
+            module_group_keys[module] = mkey
+            node_data.append(
+                {
+                    "text": f"модуль {module}",
+                    "isGroup": True,
+                    "key": mkey,
+                    "group": gkey,
+                    "dash": [2, 2],
+                }
+            )
+
+        # Исходники: внутри модуля — в его группу, иначе — в группу репозитория
+        for i, src in enumerate(repo.get("sources", [])):
             mk = node_key
             node_key += 1
-            module_keys[(repo["name"], mod["name"])] = mk
+            source_keys[(repo["name"], src["name"])] = mk
             node_data.append(
                 {
                     "key": mk,
-                    "name": mod["name"],
+                    "name": src["name"],
                     "loc": f"{180 + i * 220} {repo_y + 60}",
-                    "group": gkey,
+                    "group": module_group_keys.get(src.get("module", ""), gkey),
                     "mod": "mod",
                     "lang": (repo["language"][:2] if repo["language"] else ""),
                 }
@@ -181,8 +229,8 @@ def _generate_cert(
             for edge in link["edges"]:
                 client_mod = module_name_for_path(edge.get("client_file", ""))
                 server_mod = module_name_for_path(node_to_file.get(edge.get("server_node_id", ""), ""))
-                src_key = module_keys.get((edge.get("client_repo", ""), client_mod))
-                dst_key = module_keys.get((edge.get("server_repo", ""), server_mod))
+                src_key = source_keys.get((edge.get("client_repo", ""), client_mod))
+                dst_key = source_keys.get((edge.get("server_repo", ""), server_mod))
                 if src_key is None or dst_key is None or src_key == dst_key:
                     continue
                 link_data.append(
@@ -253,7 +301,9 @@ def _generate_svg(
     for repo in repos:
         cy = y + repo_h / 2
         repo_centers[repo["name"]] = (width / 2, cy)
-        mods = ", ".join(m["name"] for m in repo["modules"][:6])
+        mods = ", ".join(s["name"] for s in repo["sources"][:6])
+        if repo.get("modules"):
+            mods = f"модули: {', '.join(repo['modules'][:3])}; " + mods
         svg += (
             f'  <rect x="120" y="{y}" width="{width - 240}" height="{repo_h}" '
             f'fill="white" stroke="#000" stroke-width="2"/>\n'
@@ -386,6 +436,7 @@ def _config_from_scan(data: dict[str, Any], base_dir: str) -> ProjectConfig:
                 path=str(repo.get("path", "")),
                 language=str(repo.get("language", "")),
                 role=str(repo.get("role", "")),
+                modules=[str(m) for m in (repo.get("modules") or []) if str(m).strip()],
             )
         )
     links = [

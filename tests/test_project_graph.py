@@ -7,6 +7,7 @@ from attack_surface._attack_surface import ReachabilityResult
 from attack_surface._linker import CrossRepoEdge
 from attack_surface._project_config import LinkConfig, ProjectConfig, RepoConfig
 from attack_surface._project_graph import (
+    _source_module,
     build_project_graph_model,
     generate_project_graph,
     generate_project_graph_from_scan,
@@ -179,3 +180,88 @@ def test_generate_repo_topology_graph(tmp_path):
     with open(artifacts["project_topology.svg"], "r", encoding="utf-8") as fh:
         svg = fh.read()
     assert "http" in svg  # подпись ребра на уровне репозиториев
+
+
+def test_model_sources_and_modules(tmp_path):
+    """Тест: в модели исходники и git-модули разделены, принадлежность фиксируется."""
+    (tmp_path / "frontend").mkdir()
+    (tmp_path / "backend" / "core").mkdir(parents=True)
+    repos = [
+        RepoConfig(name="frontend", path=str(tmp_path / "frontend"), language="javascript", role="ui"),
+        RepoConfig(name="backend", path=str(tmp_path / "backend"), language="python", role="api",
+                   modules=["core"]),
+    ]
+    config = ProjectConfig(project="x", repos=repos, links=[])
+    eps = {
+        "frontend": {
+            "f1": {
+                "function_name": "fetchOrders",
+                "file_path": str(tmp_path / "frontend" / "src" / "api.js"),
+                "start_line": 1, "end_line": 3,
+                "entry_point_type": "http_request",
+                "external_input_sources": [],
+            }
+        },
+        "backend": {
+            "b1": {
+                "function_name": "handler",
+                "file_path": str(tmp_path / "backend" / "core" / "main.py"),
+                "start_line": 1, "end_line": 3,
+                "entry_point_type": "http_request",
+                "external_input_sources": [],
+            }
+        },
+    }
+
+    model = build_project_graph_model(config, eps, [])
+    by_name = {r["name"]: r for r in model["repos"]}
+
+    assert by_name["backend"]["modules"] == ["core"]
+    assert by_name["backend"]["sources"][0]["module"] == "core"
+    assert by_name["frontend"]["modules"] == []
+    assert by_name["frontend"]["sources"][0]["module"] == ""
+
+
+def test_cert_includes_module_groups(tmp_path):
+    """Тест: CERT-схема содержит группы git-модулей внутри репозитория."""
+    (tmp_path / "backend" / "core").mkdir(parents=True)
+    repos = [
+        RepoConfig(name="backend", path=str(tmp_path / "backend"), language="python",
+                   modules=["core"]),
+    ]
+    config = ProjectConfig(project="x", repos=repos, links=[])
+    eps = {
+        "backend": {
+            "b1": {
+                "function_name": "handler",
+                "file_path": str(tmp_path / "backend" / "core" / "main.py"),
+                "start_line": 1, "end_line": 3,
+                "entry_point_type": "http_request",
+                "external_input_sources": [],
+            }
+        }
+    }
+
+    output_dir = str(tmp_path / "out")
+    generate_project_graph(config, eps, [], output_dir, output_format="cert")
+    with open(os.path.join(output_dir, "project_attack_surface.json"), encoding="utf-8") as fh:
+        cert = json.load(fh)
+
+    groups = [n for n in cert["nodeDataArray"] if n.get("isGroup")]
+    assert any(g["text"] == "модуль core" for g in groups)
+
+
+def test_source_module_longest_prefix(tmp_path):
+    """Тест: исходник привязывается к самому глубокому модулю."""
+    (tmp_path / "backend" / "core" / "sub").mkdir(parents=True)
+    repo = RepoConfig(
+        name="backend",
+        path=str(tmp_path / "backend"),
+        language="python",
+        modules=["core", "core/sub"],
+    )
+
+    assert _source_module(repo, str(tmp_path / "backend" / "core" / "main.py")) == "core"
+    assert _source_module(repo, str(tmp_path / "backend" / "core" / "sub" / "x.py")) == "core/sub"
+    assert _source_module(repo, str(tmp_path / "backend" / "other" / "x.py")) == ""
+    assert _source_module(repo, "") == ""

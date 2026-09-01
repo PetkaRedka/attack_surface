@@ -133,6 +133,22 @@ def test_build_threagile_model():
     assert "data_flows" in model
 
 
+def test_modules_roundtrip(tmp_path):
+    """Тест: модули записываются в подраздел актива и читаются обратно."""
+    config = ProjectConfig(
+        project="my-product",
+        repos=[RepoConfig(name="backend", path="/x/backend", language="python", modules=["core"])],
+        links=[],
+    )
+    path = save_threagile(config, str(tmp_path / "threagile.yaml"))
+
+    data = yaml.safe_load(open(path, encoding="utf-8"))
+    assert data["technical_assets"][0]["modules"] == ["core"]
+
+    loaded = load_threagile(path)
+    assert loaded.repos[0].modules == ["core"]
+
+
 def _edge() -> CrossRepoEdge:
     return CrossRepoEdge(
         link=LinkConfig(from_repo="frontend", to_repo="backend", type="http"),

@@ -197,7 +197,7 @@ def _discover_by_git(root: str, git_depth: int | None) -> list[RepoConfig]:
     Если маркер есть в самом корне, корень считается единственным
     репозиторием. Иначе поиск идёт на глубину ``git_depth``; внутрь
     найденных репозиториев не спускаемся (вложенные репозитории
-    не учитываются).
+    становятся модулями репозитория, см. ``_discover_modules``).
     """
     if git_depth is None:
         git_depth = _git_depth()
@@ -210,6 +210,7 @@ def _discover_by_git(root: str, git_depth: int | None) -> list[RepoConfig]:
                 path=root,
                 language=detect_language(root),
                 role="",
+                modules=_discover_modules(root, git_depth),
             )
         ]
 
@@ -236,12 +237,49 @@ def _discover_by_git(root: str, git_depth: int | None) -> list[RepoConfig]:
                         path=path,
                         language=detect_language(path),
                         role="",
+                        modules=_discover_modules(path, git_depth),
                     )
                 )
             else:
                 stack.append((path, depth + 1))
     repos.sort(key=lambda r: r.name)
     return repos
+
+
+def _discover_modules(repo_path: str, git_depth: int | None) -> list[str]:
+    """Модули репозитория: git-поддиректории внутри него.
+
+    Модуль идентифицируется относительным путём от корня репозитория
+    (например ``pizda/bobik``), поэтому вложенность любой глубины
+    сохраняется. Поиск идёт на глубину ``git_depth`` и спускается
+    внутрь найденных модулей (но не в каталоги ``.git``). Возвращает
+    пустой список, если у репозитория нет модулей.
+    """
+    if git_depth is None:
+        git_depth = _git_depth()
+    repo_path = os.path.abspath(repo_path)
+
+    modules: list[str] = []
+    stack: list[tuple[str, int]] = [(repo_path, 0)]
+    while stack:
+        current, depth = stack.pop()
+        if depth >= git_depth:
+            continue
+        try:
+            entries = sorted(os.listdir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.startswith(".") or entry in _EXCLUDED_DIRS:
+                continue
+            path = os.path.join(current, entry)
+            if not os.path.isdir(path):
+                continue
+            if _has_git_marker(path):
+                modules.append(os.path.relpath(path, repo_path).replace("\\", "/"))
+            # Спускаемся дальше (в т.ч. внутрь модулей) в поисках вложенных .git
+            stack.append((path, depth + 1))
+    return sorted(modules)
 
 
 # ---------------------------------------------------------------------------

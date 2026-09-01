@@ -101,10 +101,12 @@ echo "--- project store (auto-links по конфигу) ---"
 echo "--- project git-probe (auto-config по .git) ---"
 GIT_PROBE="$OUT/git-probe"
 mkdir -p "$GIT_PROBE/service-a/.git" "$GIT_PROBE/service-a/src" \
+         "$GIT_PROBE/service-a/core/.git" "$GIT_PROBE/service-a/core/src" \
          "$GIT_PROBE/service-b/.git" "$GIT_PROBE/service-b/src" \
          "$GIT_PROBE/docs"
 printf 'def handler(req):\n    return call_b(req)\n' > "$GIT_PROBE/service-a/src/main.py"
 printf 'def call_b(x):\n    return x\n' > "$GIT_PROBE/service-a/src/client.py"
+printf 'def core_handler(req):\n    return req\n' > "$GIT_PROBE/service-a/core/src/core.py"
 printf 'package main\n' > "$GIT_PROBE/service-b/src/main.go"
 printf 'docs\n' > "$GIT_PROBE/docs/README.md"
 GIT_SUPPORT=1 "$CLI" project --project-path "$GIT_PROBE" \

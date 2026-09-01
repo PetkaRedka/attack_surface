@@ -108,6 +108,62 @@ def test_discover_by_git_root_is_repo(tmp_path):
     assert repos[0].path == str(tmp_path)
 
 
+def test_discover_modules(tmp_path):
+    """Тест: git-поддиректории внутри репозитория становятся модулями."""
+    _make_git_dir(tmp_path, "backend")
+    _make_git_dir(tmp_path, "backend/core")
+    _make_git_dir(tmp_path, "backend/plugins/plugin-a")
+    _write(tmp_path, "backend/main.py")
+    _write(tmp_path, "backend/core/main.py")
+    _write(tmp_path, "backend/plugins/plugin-a/main.py")
+
+    repos = discover_repositories(str(tmp_path), git_support=True)
+
+    assert len(repos) == 1
+    assert repos[0].name == "backend"
+    assert set(repos[0].modules) == {"core", "plugins/plugin-a"}
+
+
+def test_discover_modules_none(tmp_path):
+    """Тест: репозиторий без вложенных git-директорий не имеет модулей."""
+    _make_git_dir(tmp_path, "backend")
+    _write(tmp_path, "backend/main.py")
+
+    repos = discover_repositories(str(tmp_path), git_support=True)
+
+    assert repos[0].modules == []
+
+
+def test_discover_nested_modules(tmp_path):
+    """Тест: git внутри git — вложенный модуль с путём от корня репозитория."""
+    _make_git_dir(tmp_path, "backend")
+    _make_git_dir(tmp_path, "backend/core")
+    _make_git_dir(tmp_path, "backend/core/sub")
+    _write(tmp_path, "backend/main.py")
+    _write(tmp_path, "backend/core/main.py")
+    _write(tmp_path, "backend/core/sub/main.py")
+
+    repos = discover_repositories(str(tmp_path), git_support=True)
+
+    assert len(repos) == 1
+    assert set(repos[0].modules) == {"core", "core/sub"}
+
+
+def test_discover_modules_depth(tmp_path):
+    """Тест: глубина поиска модулей ограничена GIT_DEPTH."""
+    _make_git_dir(tmp_path, "backend")
+    _make_git_dir(tmp_path, "backend/a/b/c")
+
+    repos = discover_repositories(str(tmp_path), git_support=True, git_depth=2)
+
+    # a/b (глубина 2) и a (глубина 1) — каталоги без .git, обходятся;
+    # a/b/c (глубина 3) — за пределами глубины
+    assert repos[0].modules == []
+
+    repos = discover_repositories(str(tmp_path), git_support=True, git_depth=3)
+    assert "a/b/c" in repos[0].modules
+
+
 def test_discover_git_support_env(tmp_path, monkeypatch):
     """Тест: флаг GIT_SUPPORT переключает режим обнаружения."""
     _make_git_dir(tmp_path, "backend")
