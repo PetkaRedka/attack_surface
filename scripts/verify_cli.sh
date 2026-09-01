@@ -20,6 +20,15 @@ PYTHON=".cli-venv/Scripts/python.exe"
 OUT="test_projects/verification"
 mkdir -p "$OUT"
 
+# Тестовые проекты store/multi-service не являются git-репозиториями —
+# для их авто-конфига используем языковое обнаружение
+GIT_SUPPORT=false
+export GIT_SUPPORT
+
+# Единый каталог кэша по версиям для всех секций верификации
+ATTACK_CACHE_DIR="$OUT/cache"
+export ATTACK_CACHE_DIR
+
 echo "=== CLI: $CLI ==="
 "$CLI" --help > /dev/null
 
@@ -88,6 +97,18 @@ echo "--- project store (auto-config, threagile) ---"
 echo "--- project store (auto-links по конфигу) ---"
 "$CLI" project --config test_projects/store/project.json --auto-links \
     --output-dir "$OUT/project-store-auto-links" --no-llm
+
+echo "--- project git-probe (auto-config по .git) ---"
+GIT_PROBE="$OUT/git-probe"
+mkdir -p "$GIT_PROBE/service-a/.git" "$GIT_PROBE/service-a/src" \
+         "$GIT_PROBE/service-b/.git" "$GIT_PROBE/service-b/src" \
+         "$GIT_PROBE/docs"
+printf 'def handler(req):\n    return call_b(req)\n' > "$GIT_PROBE/service-a/src/main.py"
+printf 'def call_b(x):\n    return x\n' > "$GIT_PROBE/service-a/src/client.py"
+printf 'package main\n' > "$GIT_PROBE/service-b/src/main.go"
+printf 'docs\n' > "$GIT_PROBE/docs/README.md"
+GIT_SUPPORT=1 "$CLI" project --project-path "$GIT_PROBE" \
+    --output-dir "$OUT/project-git-probe" --no-llm
 
 echo "=== 5. Экспорт Threagile (export-threagile) ==="
 "$CLI" export-threagile \

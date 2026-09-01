@@ -106,6 +106,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Пересобрать граф (CERT/SVG) из готового project_scan.json "
         "без сканирования и LLM",
     )
+    proj.add_argument(
+        "--no-cache", action="store_true",
+        help="Не использовать кэш по версиям репозиториев (ATTACK_CACHE=false)",
+    )
 
     # --- render-threagile -----------------------------------------------
     rend = sub.add_parser(
@@ -413,6 +417,7 @@ def _cmd_project(args: argparse.Namespace) -> None:
         graph_format=args.graph_format,
         auto_links=args.auto_links,
         entrypoints_dir=args.entrypoints_dir,
+        use_cache=not args.no_cache,
     )
     result = scanner.scan()
 

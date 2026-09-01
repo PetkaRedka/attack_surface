@@ -44,12 +44,12 @@ def test_detect_language_unknown(tmp_path):
 
 
 def test_discover_repositories(tmp_path):
-    """Тест: обнаруживаются только подкаталоги с определяемым языком."""
+    """Тест: при GIT_SUPPORT=false обнаруживаются подкаталоги с языком."""
     _write(tmp_path, "backend/main.py")
     _write(tmp_path, "frontend/package.json")
     _write(tmp_path, "docs/README.md")
 
-    repos = discover_repositories(str(tmp_path))
+    repos = discover_repositories(str(tmp_path), git_support=False)
 
     assert {r.name for r in repos} == {"backend", "frontend"}
     by_name = {r.name: r for r in repos}
@@ -57,12 +57,75 @@ def test_discover_repositories(tmp_path):
     assert by_name["frontend"].language == "javascript"
 
 
+def _make_git_dir(tmp_path, name):
+    """Создать каталог-репозиторий с маркером .git."""
+    repo = tmp_path / name
+    (repo / ".git").mkdir(parents=True, exist_ok=True)
+    return repo
+
+
+def test_discover_by_git(tmp_path):
+    """Тест: репозиторием считается только каталог с .git."""
+    _make_git_dir(tmp_path, "backend")
+    _write(tmp_path, "frontend/package.json")  # код без .git — не репозиторий
+
+    repos = discover_repositories(str(tmp_path), git_support=True)
+
+    assert [r.name for r in repos] == ["backend"]
+
+
+def test_discover_by_git_submodule_marker(tmp_path):
+    """Тест: субмодуль (.git — файл-указатель) тоже репозиторий."""
+    repo = tmp_path / "plugin"
+    repo.mkdir()
+    _write(tmp_path, "plugin/.git", content="gitdir: ../.git/modules/plugin\n")
+    _write(tmp_path, "plugin/main.py")
+
+    repos = discover_repositories(str(tmp_path), git_support=True)
+
+    assert [r.name for r in repos] == ["plugin"]
+
+
+def test_discover_by_git_depth(tmp_path):
+    """Тест: глубина поиска .git ограничена GIT_DEPTH."""
+    _make_git_dir(tmp_path, "group/service")
+
+    assert discover_repositories(str(tmp_path), git_support=True, git_depth=1) == []
+    assert [r.name for r in discover_repositories(
+        str(tmp_path), git_support=True, git_depth=2
+    )] == ["service"]
+
+
+def test_discover_by_git_root_is_repo(tmp_path):
+    """Тест: корень с .git считается единственным репозиторием."""
+    _make_git_dir(tmp_path, "sub")  # вложенный репозиторий игнорируется
+    (tmp_path / ".git").mkdir()
+
+    repos = discover_repositories(str(tmp_path), git_support=True)
+
+    assert len(repos) == 1
+    assert repos[0].name == tmp_path.name
+    assert repos[0].path == str(tmp_path)
+
+
+def test_discover_git_support_env(tmp_path, monkeypatch):
+    """Тест: флаг GIT_SUPPORT переключает режим обнаружения."""
+    _make_git_dir(tmp_path, "backend")
+    _write(tmp_path, "frontend/package.json")
+
+    monkeypatch.setenv("GIT_SUPPORT", "false")
+    assert {r.name for r in discover_repositories(str(tmp_path))} == {"frontend"}
+
+    monkeypatch.setenv("GIT_SUPPORT", "true")
+    assert [r.name for r in discover_repositories(str(tmp_path))] == ["backend"]
+
+
 def test_build_auto_config(tmp_path):
     """Тест: формирование ProjectConfig из корневого каталога."""
     _write(tmp_path, "backend/main.py")
     _write(tmp_path, "frontend/package.json")
 
-    config = build_auto_config(str(tmp_path))
+    config = build_auto_config(str(tmp_path), git_support=False)
 
     assert config.project == tmp_path.name
     assert len(config.repos) == 2
@@ -74,7 +137,7 @@ def test_build_auto_config_threagile(tmp_path):
     """Тест: в Threagile-режиме связи трактуются как доверенные."""
     _write(tmp_path, "backend/main.py")
 
-    config = build_auto_config(str(tmp_path), threagile=True)
+    config = build_auto_config(str(tmp_path), threagile=True, git_support=False)
 
     assert config.links_authoritative is True
 
@@ -84,7 +147,7 @@ def test_build_auto_config_no_repos(tmp_path):
     _write(tmp_path, "docs/README.md")
 
     try:
-        build_auto_config(str(tmp_path))
+        build_auto_config(str(tmp_path), git_support=False)
         assert False, "ожидалась ошибка ValueError"
     except ValueError:
         pass
@@ -93,7 +156,7 @@ def test_build_auto_config_no_repos(tmp_path):
 def test_save_auto_config_json(tmp_path):
     """Тест: авто-конфиг сохраняется в JSON."""
     _write(tmp_path, "backend/main.py")
-    config = build_auto_config(str(tmp_path))
+    config = build_auto_config(str(tmp_path), git_support=False)
 
     path = save_auto_config(config, str(tmp_path / "out"), "json")
 
@@ -107,7 +170,7 @@ def test_save_auto_config_json(tmp_path):
 def test_save_auto_config_threagile(tmp_path):
     """Тест: авто-конфиг сохраняется в архитектурный YAML Threagile."""
     _write(tmp_path, "backend/main.py")
-    config = build_auto_config(str(tmp_path), threagile=True)
+    config = build_auto_config(str(tmp_path), threagile=True, git_support=False)
 
     path = save_auto_config(config, str(tmp_path / "out"), "threagile")
 

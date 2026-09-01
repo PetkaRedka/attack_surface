@@ -23,6 +23,9 @@ from typing import Any
 from tqdm import tqdm
 
 from attack_surface._attack_surface import ReachabilityResult, compute_attack_surface
+from attack_surface._cache import CacheStore, dump_graph_projection, links_hash_for
+from attack_surface._env import flag as env_flag
+from attack_surface._env import int_value as env_int
 from attack_surface._extractor import EntryPointExtractor, _read_source_lines
 from attack_surface._interface_llm import (
     InterfaceBatchAnalyzerLLM,
@@ -52,6 +55,8 @@ class RepoScanResult:
     entry_points: dict[str, EntryPointInfo] = field(default_factory=dict)
     interfaces: dict[str, InterfaceDescriptor] = field(default_factory=dict)
     graph: Any = None
+    #: Версия репозитория (git-коммит или хэш файлов) для кэша
+    version: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -90,21 +95,12 @@ class ProjectScanResult:
 
 def _env_flag(name: str, default: bool) -> bool:
     """Прочитать логический флаг из переменной окружения."""
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() not in ("0", "false", "no", "off", "")
+    return env_flag(name, default)
 
 
 def _env_int(name: str, default: int) -> int:
     """Прочитать целое число из переменной окружения."""
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return int(value.strip())
-    except ValueError:
-        return default
+    return env_int(name, default)
 
 
 def _resolve_node(graph: Any, file_path: str, line: int) -> str:
@@ -282,6 +278,58 @@ def load_repo_scan_results(
     return results
 
 
+def _ep_key(ep: EntryPointInfo) -> tuple[str, str, int, int]:
+    """Ключ точки входа: файл, функция, диапазон строк."""
+    return (ep.file_path, ep.function_name, ep.start_line, ep.end_line)
+
+
+def _interfaces_by_key(
+    cached: dict[str, Any] | None,
+) -> dict[tuple[str, str, int, int], InterfaceDescriptor]:
+    """Интерфейсы из кэш-записи, проиндексированные по ключу точки входа."""
+    result: dict[tuple[str, str, int, int], InterfaceDescriptor] = {}
+    if not cached:
+        return result
+    entry_points = cached.get("entry_points") or {}
+    for node_id, desc in (cached.get("interfaces") or {}).items():
+        ep = entry_points.get(node_id)
+        if not isinstance(ep, dict) or not isinstance(desc, dict):
+            continue
+        key = (
+            str(ep.get("file_path", "")),
+            str(ep.get("function_name", "")),
+            int(ep.get("start_line", 0)),
+            int(ep.get("end_line", 0)),
+        )
+        result[key] = InterfaceDescriptor.from_dict(desc)
+    return result
+
+
+def _edge_cache_key(edge: CrossRepoEdge) -> tuple[str, str, str, str, str, int]:
+    """Ключ связи для кэша: тип, серверная сигнатура, место вызова."""
+    return (
+        edge.link.type,
+        edge.server_repo,
+        edge.server_signature,
+        edge.client_repo,
+        edge.client_file,
+        edge.client_line,
+    )
+
+
+def _edge_cache_key_from_dict(edge: dict[str, Any]) -> tuple[str, str, str, str, str, int]:
+    """Ключ связи из JSON-представления (см. ``_edge_cache_key``)."""
+    link = edge.get("link") or {}
+    return (
+        str(link.get("type", "")),
+        str(edge.get("server_repo", "")),
+        str(edge.get("server_signature", "")),
+        str(edge.get("client_repo", "")),
+        str(edge.get("client_file", "")),
+        int(edge.get("client_line", 0)),
+    )
+
+
 def _resolve_node_eps(
     entry_points: dict[str, EntryPointInfo], file_path: str, line: int
 ) -> str:
@@ -326,6 +374,8 @@ class ProjectScanner:
         graph_format: str = "svg",
         auto_links: bool = False,
         entrypoints_dir: str | None = None,
+        use_cache: bool = True,
+        cache_dir: str | None = None,
     ) -> None:
         self._config = config
         self._logger = logger
@@ -344,6 +394,17 @@ class ProjectScanner:
 
         self._bidirectional = _env_flag("CROSS_REPO_BIDIRECTIONAL", True)
         self._confirm_links = _env_flag("CROSS_REPO_CONFIRM_LINKS", True)
+
+        # Кэш по версиям: по умолчанию в каталоге проекта, каталог можно
+        # переопределить переменной окружения ATTACK_CACHE_DIR
+        self._use_cache = use_cache and _env_flag("ATTACK_CACHE", True)
+        if self._use_cache:
+            cache_root = cache_dir or os.getenv("ATTACK_CACHE_DIR") or config.base_dir
+            if not cache_root:
+                cache_root = os.path.dirname(os.path.abspath(output_dir))
+            self._cache = CacheStore(cache_root, config.project)
+        else:
+            self._cache = None
 
     # ------------------------------------------------------------------
 
@@ -373,22 +434,37 @@ class ProjectScanner:
         repo_interfaces = {r.repo.name: self._repo_interfaces(r) for r in repo_results}
         linker = CrossRepoLinker(self._config, bidirectional=self._bidirectional)
 
+        # Кэш связей: подтверждения из предыдущей совокупной версии
+        # переиспользуются по ключу (тип, сигнатура, место вызова)
+        repo_versions = {r.repo.name: r.version for r in repo_results if r.version}
+        links_hash = links_hash_for(repo_versions) if repo_versions else ""
+        prev_confirmed: dict[tuple[str, str, str, str, str, int], str] = {}
+        if self._cache is not None and links_hash:
+            prev_links = self._cache.load_previous_links(links_hash)
+            if prev_links:
+                prev_confirmed = {
+                    _edge_cache_key_from_dict(edge): str(edge.get("confidence", ""))
+                    for edge in prev_links.get("edges", [])
+                    if isinstance(edge, dict)
+                }
+
         if self._config.links_authoritative and self._config.links and not self._auto_links:
             # Связи заданы архитектором — не верифицируем, а сопоставляем эндпоинты
             edges = linker.find_authoritative_links(repo_interfaces)
             self._logger.print_console(f"  Связей по архитектурному конфигу: {len(edges)}")
-        elif self._auto_links or not self._config.links:
-            # Авто-режим: связей в конфиге нет (или они игнорируются) —
-            # ищем обращения ко всем серверным эндпоинтам всех пар
-            edges = linker.find_auto_links(repo_interfaces)
-            self._logger.print_console(f"  Найдено кандидатов связей (авто-перебор): {len(edges)}")
-
-            edges = self._confirm_edges_batch(edges)
         else:
-            edges = linker.find_links(repo_interfaces)
-            self._logger.print_console(f"  Найдено кандидатов связей: {len(edges)}")
+            if self._auto_links or not self._config.links:
+                # Авто-режим: связей в конфиге нет (или они игнорируются) —
+                # ищем обращения ко всем серверным эндпоинтам всех пар
+                edges = linker.find_auto_links(repo_interfaces)
+                self._logger.print_console(
+                    f"  Найдено кандидатов связей (авто-перебор): {len(edges)}"
+                )
+            else:
+                edges = linker.find_links(repo_interfaces)
+                self._logger.print_console(f"  Найдено кандидатов связей: {len(edges)}")
 
-            edges = self._confirm_edges_batch(edges)
+            edges = self._confirm_edges_batch(edges, prev_confirmed)
 
         # Сопоставление клиентских функций для достижимости.
         # Без графа вызовов (пересборка из JSON) узел резолвится по точкам входа.
@@ -416,6 +492,11 @@ class ProjectScanner:
         # Чекпойнт: подтверждённые (или доверенные) межрепо связи
         cross_edges_path = self._save_cross_edges(edges)
         self._logger.print_console(f"  Подтверждённые связи: {cross_edges_path}")
+
+        # Сохранить связи и текущие версии в кэш
+        if self._cache is not None and links_hash:
+            self._cache.save_links(links_hash, [e.to_dict() for e in edges])
+            self._cache.save_current(repo_versions, links_hash)
 
         # Поверхность атаки большого графа
         attack_surface = self._compute_attack_surface(repo_results, edges)
@@ -465,28 +546,68 @@ class ProjectScanner:
             json.dump([e.to_dict() for e in edges], fh, indent=2, ensure_ascii=False)
         return path
 
-    def _confirm_edges_batch(self, edges: list[CrossRepoEdge]) -> list[CrossRepoEdge]:
-        """Подтвердить кандидатов связей батчами (или без LLM)."""
+    def _confirm_edges_batch(
+        self,
+        edges: list[CrossRepoEdge],
+        prev_confirmed: dict[tuple[str, str, str, str, str, int], str],
+    ) -> list[CrossRepoEdge]:
+        """Подтвердить кандидатов связей батчами с переиспользованием кэша.
+
+        Связи, уже подтверждённые в предыдущей версии (совпадает ключ
+        «тип, серверная сигнатура, место вызова»), не отправляются в LLM;
+        остальные подтверждаются батчами. Без LLM возвращает всех кандидатов.
+        """
         if not (self._use_llm and self._confirm_links and edges):
             return edges
+
+        reuse: list[CrossRepoEdge] = []
+        to_ask: list[CrossRepoEdge] = []
+        for edge in edges:
+            confidence = prev_confirmed.get(_edge_cache_key(edge))
+            if confidence is not None:
+                edge.confidence = confidence
+                reuse.append(edge)
+            else:
+                to_ask.append(edge)
+        if reuse:
+            self._logger.print_console(f"  Переиспользовано связей из кэша: {len(reuse)}")
+        if not to_ask:
+            return edges
+
         batch_size = max(1, _env_int("LINK_BATCH_SIZE", 10))
         validator = LinkBatchValidatorLLM(
             self._model_name, self._temperature, "multi", self._max_query_num, self._logger
         )
-        edges = confirm_edges_batch(validator, edges, batch_size)
-        self._logger.print_console(f"  Подтверждено связей: {len(edges)}")
-        return edges
+        to_ask = confirm_edges_batch(validator, to_ask, batch_size)
+        confirmed = reuse + to_ask
+        self._logger.print_console(f"  Подтверждено связей: {len(confirmed)}")
+        return confirmed
 
     # ------------------------------------------------------------------
 
     def _scan_repo(self, repo: RepoConfig) -> RepoScanResult:
         from trailmark import parse_directory
 
+        from attack_surface._versioning import get_repo_version
+
         self._logger.print_console(f"\nСканирование репозитория '{repo.name}'…")
         if not os.path.isdir(repo.path):
             self._logger.print_console(f"  Каталог не найден, пропуск: {repo.path}")
             return RepoScanResult(repo=repo, language=repo.language)
 
+        version = get_repo_version(repo.path)
+
+        # Быстрый путь: версия не менялась — восстанавливаем результат из кэша
+        if self._cache is not None:
+            cached = self._cache.load_repo(repo.name, version)
+            if cached is not None:
+                self._logger.print_console(
+                    f"  Кэш: результат для версии {version[:12]} уже есть — пропуск "
+                    f"сканирования и валидации"
+                )
+                return self._repo_result_from_cache(repo, cached)
+
+        self._logger.print_console(f"  Версия: {version[:12]}…")
         graph = parse_directory(repo.path, language=repo.language)
         language = graph.language if graph.language != "polyglot" else repo.language
         self._logger.print_console(
@@ -501,11 +622,47 @@ class ProjectScanner:
         # позволяет продолжить анализ при прерывании на валидации
         self._save_repo_checkpoint(repo, language, entry_points, {})
 
-        interfaces = self._analyze_interfaces(repo, language, entry_points)
+        # Инкрементальная валидация: точки, уже верифицированные в предыдущей
+        # версии (тот же файл, функция и диапазон строк), переиспользуются;
+        # LLM вызывается только для новых точек
+        prev_interfaces: dict[str, InterfaceDescriptor] = {}
+        if self._cache is not None:
+            prev = self._cache.load_previous_repo(repo.name, version)
+            prev_interfaces = _interfaces_by_key(prev)
+
+        to_validate: dict[str, EntryPointInfo] = {}
+        interfaces: dict[str, InterfaceDescriptor] = {}
+        for node_id, ep in entry_points.items():
+            key = _ep_key(ep)
+            prev_desc = prev_interfaces.get(key)
+            if prev_desc is not None:
+                interfaces[node_id] = prev_desc
+            else:
+                to_validate[node_id] = ep
+        if to_validate:
+            self._logger.print_console(
+                f"  Новых точек входа (требуют валидации): {len(to_validate)}"
+            )
+            interfaces.update(self._analyze_interfaces(repo, language, to_validate))
+        elif entry_points:
+            self._logger.print_console(
+                "  Все точки входа уже верифицированы в предыдущей версии"
+            )
 
         # Чекпойнт: верифицированные точки входа и интерфейсы — готовы
         # к пересборке через --entrypoints-dir без повторной валидации
         self._save_repo_checkpoint(repo, language, entry_points, interfaces)
+
+        # Сохранить результат в кэш для текущей версии
+        if self._cache is not None:
+            self._cache.save_repo(
+                repo.name,
+                version,
+                {k: v.to_dict() for k, v in entry_points.items()},
+                {k: v.to_dict() for k, v in interfaces.items()},
+                dump_graph_projection(graph),
+                language,
+            )
 
         return RepoScanResult(
             repo=repo,
@@ -513,6 +670,28 @@ class ProjectScanner:
             entry_points=entry_points,
             interfaces=interfaces,
             graph=graph,
+            version=version,
+        )
+
+    def _repo_result_from_cache(self, repo: RepoConfig, cached: dict[str, Any]) -> RepoScanResult:
+        """Восстановить результат сканирования из кэш-записи."""
+        from attack_surface._cache import load_graph_projection
+
+        entry_points: dict[str, EntryPointInfo] = {}
+        for node_id, ep in (cached.get("entry_points") or {}).items():
+            if isinstance(ep, dict):
+                entry_points[str(node_id)] = EntryPointInfo.from_dict(ep)
+        interfaces: dict[str, InterfaceDescriptor] = {}
+        for node_id, desc in (cached.get("interfaces") or {}).items():
+            if isinstance(desc, dict):
+                interfaces[str(node_id)] = InterfaceDescriptor.from_dict(desc)
+        return RepoScanResult(
+            repo=repo,
+            language=str(cached.get("language") or repo.language),
+            entry_points=entry_points,
+            interfaces=interfaces,
+            graph=load_graph_projection(cached.get("graph") or {}),
+            version=str(cached.get("version") or ""),
         )
 
     def _analyze_interfaces(

@@ -15,8 +15,39 @@ from __future__ import annotations
 import json
 import os
 
+from attack_surface._env import flag as env_flag
+from attack_surface._env import int_value as env_int
 from attack_surface._linker import _EXCLUDED_DIRS
 from attack_surface._project_config import ProjectConfig, RepoConfig
+
+
+# ---------------------------------------------------------------------------
+# Режим обнаружения репозиториев
+# ---------------------------------------------------------------------------
+
+#: Искать репозитории по наличию ``.git`` (иначе — по подкаталогам с кодом)
+GIT_SUPPORT_DEFAULT = True
+#: Максимальная глубина поиска ``.git`` от корня проекта
+GIT_DEPTH_DEFAULT = 3
+
+
+def _git_support() -> bool:
+    """Флаг GIT_SUPPORT: репозиториями считаются каталоги с .git."""
+    return env_flag("GIT_SUPPORT", GIT_SUPPORT_DEFAULT)
+
+
+def _git_depth() -> int:
+    """Максимальная глубина поиска .git (GIT_DEPTH)."""
+    return max(1, env_int("GIT_DEPTH", GIT_DEPTH_DEFAULT))
+
+
+def _has_git_marker(path: str) -> bool:
+    """Содержит ли каталог маркер git-репозитория.
+
+    В обычном репозитории ``.git`` — каталог, в субмодуле — файл-указатель.
+    """
+    git = os.path.join(path, ".git")
+    return os.path.isdir(git) or os.path.isfile(git)
 
 
 # ---------------------------------------------------------------------------
@@ -117,8 +148,32 @@ _EXTENSION_PRIORITY: dict[str, int] = {"cpp": 1}
 # Обнаружение репозиториев
 # ---------------------------------------------------------------------------
 
-def discover_repositories(root: str) -> list[RepoConfig]:
-    """Обнаружить репозитории как подкаталоги первого уровня.
+def discover_repositories(
+    root: str,
+    *,
+    git_support: bool | None = None,
+    git_depth: int | None = None,
+) -> list[RepoConfig]:
+    """Обнаружить репозитории в корневом каталоге проекта.
+
+    При ``git_support=True`` (по умолчанию) репозиторием считается только
+    каталог с маркером ``.git``, поиск ведётся на глубину ``git_depth``
+    (``GIT_DEPTH``) без спуска внутрь найденных репозиториев. При
+    ``git_support=False`` — прежнее поведение: подкаталоги первого уровня
+    с определяемым языком.
+
+    :param git_support: переопределяет флаг окружения ``GIT_SUPPORT``
+    :param git_depth: переопределяет глубину окружения ``GIT_DEPTH``
+    """
+    if git_support is None:
+        git_support = _git_support()
+    if git_support:
+        return _discover_by_git(root, git_depth)
+    return _discover_by_language(root)
+
+
+def _discover_by_language(root: str) -> list[RepoConfig]:
+    """Подкаталоги первого уровня с определяемым языком.
 
     Каталоги без определяемого языка (docs, assets и т.п.) пропускаются.
     """
@@ -136,6 +191,59 @@ def discover_repositories(root: str) -> list[RepoConfig]:
     return repos
 
 
+def _discover_by_git(root: str, git_depth: int | None) -> list[RepoConfig]:
+    """Репозитории — каталоги с маркером ``.git``.
+
+    Если маркер есть в самом корне, корень считается единственным
+    репозиторием. Иначе поиск идёт на глубину ``git_depth``; внутрь
+    найденных репозиториев не спускаемся (вложенные репозитории
+    не учитываются).
+    """
+    if git_depth is None:
+        git_depth = _git_depth()
+    root = os.path.abspath(root)
+
+    if _has_git_marker(root):
+        return [
+            RepoConfig(
+                name=os.path.basename(root.rstrip(os.sep)) or "project",
+                path=root,
+                language=detect_language(root),
+                role="",
+            )
+        ]
+
+    repos: list[RepoConfig] = []
+    stack: list[tuple[str, int]] = [(root, 0)]
+    while stack:
+        current, depth = stack.pop()
+        if depth >= git_depth:
+            continue
+        try:
+            entries = sorted(os.listdir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.startswith(".") or entry in _EXCLUDED_DIRS:
+                continue
+            path = os.path.join(current, entry)
+            if not os.path.isdir(path):
+                continue
+            if _has_git_marker(path):
+                repos.append(
+                    RepoConfig(
+                        name=entry,
+                        path=path,
+                        language=detect_language(path),
+                        role="",
+                    )
+                )
+            else:
+                stack.append((path, depth + 1))
+    repos.sort(key=lambda r: r.name)
+    return repos
+
+
 # ---------------------------------------------------------------------------
 # Формирование и сохранение конфига
 # ---------------------------------------------------------------------------
@@ -145,6 +253,8 @@ def build_auto_config(
     project_name: str = "",
     *,
     threagile: bool = False,
+    git_support: bool | None = None,
+    git_depth: int | None = None,
 ) -> ProjectConfig:
     """Составить ProjectConfig по корневому каталогу проекта.
 
@@ -152,6 +262,8 @@ def build_auto_config(
     :param project_name: имя проекта (по умолчанию — имя корневого каталога)
     :param threagile: True — связи будут трактоваться как доверенные
         (семантика архитектурного файла Threagile)
+    :param git_support: режим обнаружения по ``.git`` (см. discover_repositories)
+    :param git_depth: глубина поиска ``.git`` (см. discover_repositories)
     :raises ValueError: если корневой каталог не существует или в нём
         не обнаружено ни одного репозитория
     """
@@ -159,7 +271,7 @@ def build_auto_config(
     if not os.path.isdir(root):
         raise ValueError(f"Каталог проекта не найден: {root}")
 
-    repos = discover_repositories(root)
+    repos = discover_repositories(root, git_support=git_support, git_depth=git_depth)
     if not repos:
         raise ValueError(
             f"Не удалось обнаружить репозитории в каталоге: {root}"
